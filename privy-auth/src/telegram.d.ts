@@ -17,6 +17,7 @@ interface TelegramWebApp {
     }
     start_param?: string
   }
+  sendData(data: string): void
   colorScheme: 'light' | 'dark'
   themeParams: Record<string, string>
   isExpanded: boolean

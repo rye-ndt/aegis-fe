@@ -1,10 +1,18 @@
-import { usePrivy, useWallets } from '@privy-io/react-auth'
-import { useSmartWallets } from '@privy-io/react-auth/smart-wallets'
+import React from "react";
+import { usePrivy, useWallets } from "@privy-io/react-auth";
+import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 
+// ─── Icons ────────────────────────────────────────────────────────────────────
 
 function GoogleIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
       <path
         d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
         fill="#4285F4"
@@ -22,12 +30,18 @@ function GoogleIcon() {
         fill="#EA4335"
       />
     </svg>
-  )
+  );
 }
 
 function ShieldIcon() {
   return (
-    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg
+      width="40"
+      height="40"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
       <path
         d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z"
         fill="url(#shield-gradient)"
@@ -40,21 +54,30 @@ function ShieldIcon() {
         strokeLinejoin="round"
       />
       <defs>
-        <linearGradient id="shield-gradient" x1="3" y1="2" x2="21" y2="23" gradientUnits="userSpaceOnUse">
+        <linearGradient
+          id="shield-gradient"
+          x1="3"
+          y1="2"
+          x2="21"
+          y2="23"
+          gradientUnits="userSpaceOnUse"
+        >
           <stop stopColor="#7c3aed" />
           <stop offset="1" stopColor="#4f46e5" />
         </linearGradient>
       </defs>
     </svg>
-  )
+  );
 }
+
+// ─── Shared UI components ─────────────────────────────────────────────────────
 
 function LoadingSpinner() {
   return (
     <div className="flex items-center justify-center w-full min-h-dvh bg-[#0f0f1a]">
       <div className="w-8 h-8 rounded-full border-2 border-violet-500/20 border-t-violet-500 animate-spin" />
     </div>
-  )
+  );
 }
 
 function AddressRow({ label, address }: { label: string; address: string }) {
@@ -70,19 +93,91 @@ function AddressRow({ label, address }: { label: string; address: string }) {
         </p>
       </div>
     </div>
-  )
+  );
 }
 
-function ConnectedView({ eoaAddress, smartAddress }: { eoaAddress: string; smartAddress: string }) {
-  const { logout } = usePrivy()
+function TokenRow({ token }: { token: string }) {
+  const [copied, setCopied] = React.useState(false);
+
+  const copy = () => {
+    try {
+      navigator.clipboard.writeText(token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard unavailable in non-secure context
+    }
+  };
+
+  return (
+    <div className="w-full max-w-sm">
+      <p className="text-[10px] font-semibold tracking-widest text-white/30 uppercase mb-1.5 px-1">
+        Agent Auth Token
+      </p>
+      <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-4 py-3">
+        <p className="font-mono text-xs text-white/80 tracking-wide truncate flex-1">
+          {token.slice(0, 32)}…
+        </p>
+        <button
+          onClick={copy}
+          className="text-xs text-violet-400 hover:text-violet-300 flex-shrink-0 transition-colors"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <p className="text-[10px] text-white/20 mt-1.5 px-1">
+        Send to the bot with: /auth &lt;token&gt;
+      </p>
+    </div>
+  );
+}
+
+// ─── Custom hook ──────────────────────────────────────────────────────────────
+
+function usePrivySession() {
+  const { authenticated, getAccessToken } = usePrivy();
+  const [privyToken, setPrivyToken] = React.useState<string | null>(null);
+
+  // Fetch access token once after the user authenticates
+  React.useEffect(() => {
+    if (!authenticated) return;
+    getAccessToken().then(setPrivyToken);
+  }, [authenticated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Relay token to the Telegram bot automatically when running inside a mini app
+  React.useEffect(() => {
+    if (!privyToken || !window.Telegram?.WebApp?.sendData) return;
+    window.Telegram.WebApp.sendData(JSON.stringify({ privyToken }));
+  }, [privyToken]);
+
+  return privyToken;
+}
+
+// ─── Views ────────────────────────────────────────────────────────────────────
+
+function ConnectedView({
+  eoaAddress,
+  smartAddress,
+  privyToken,
+}: {
+  eoaAddress: string;
+  smartAddress: string;
+  privyToken: string | null;
+}) {
+  const { logout } = usePrivy();
 
   return (
     <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-6">
-      {/* Glow ring */}
       <div className="relative">
         <div className="absolute inset-0 rounded-full bg-violet-500/20 blur-2xl scale-150" />
         <div className="relative flex items-center justify-center w-20 h-20 rounded-full bg-violet-500/10 border border-violet-500/30">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <svg
+            width="32"
+            height="32"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
             <path
               d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z"
               fill="url(#shield-connected)"
@@ -95,7 +190,14 @@ function ConnectedView({ eoaAddress, smartAddress }: { eoaAddress: string; smart
               strokeLinejoin="round"
             />
             <defs>
-              <linearGradient id="shield-connected" x1="3" y1="2" x2="21" y2="23" gradientUnits="userSpaceOnUse">
+              <linearGradient
+                id="shield-connected"
+                x1="3"
+                y1="2"
+                x2="21"
+                y2="23"
+                gradientUnits="userSpaceOnUse"
+              >
                 <stop stopColor="#7c3aed" />
                 <stop offset="1" stopColor="#4f46e5" />
               </linearGradient>
@@ -112,6 +214,7 @@ function ConnectedView({ eoaAddress, smartAddress }: { eoaAddress: string; smart
         <AddressRow label="Smart Wallet" address={smartAddress} />
       )}
       <AddressRow label="Signer (EOA)" address={eoaAddress} />
+      {privyToken && <TokenRow token={privyToken} />}
 
       <button
         onClick={logout}
@@ -120,15 +223,14 @@ function ConnectedView({ eoaAddress, smartAddress }: { eoaAddress: string; smart
         Disconnect
       </button>
     </div>
-  )
+  );
 }
 
 function LoginView() {
-  const { login, ready } = usePrivy()
+  const { login, ready } = usePrivy();
 
   return (
     <div className="flex flex-col items-center justify-between w-full min-h-dvh bg-[#0f0f1a] px-6 py-12">
-      {/* Hero */}
       <div className="flex-1 flex flex-col items-center justify-center">
         <div className="relative mb-10">
           <div className="absolute inset-0 rounded-full bg-violet-600/30 blur-3xl scale-[2.5]" />
@@ -136,7 +238,6 @@ function LoginView() {
             <ShieldIcon />
           </div>
         </div>
-
         <h1 className="text-3xl font-bold text-white tracking-tight mb-2">
           Aegis
         </h1>
@@ -145,7 +246,6 @@ function LoginView() {
         </p>
       </div>
 
-      {/* CTA */}
       <div className="w-full max-w-sm flex flex-col gap-4">
         <div className="flex items-center gap-3 mb-2">
           <div className="flex-1 h-px bg-white/[0.08]" />
@@ -177,22 +277,31 @@ function LoginView() {
         </p>
       </div>
     </div>
-  )
+  );
 }
 
-export default function App() {
-  const { ready, authenticated } = usePrivy()
-  const { wallets } = useWallets()
-  const { client } = useSmartWallets()
+// ─── Root ─────────────────────────────────────────────────────────────────────
 
-  if (!ready) return <LoadingSpinner />
+export default function App() {
+  const { ready, authenticated } = usePrivy();
+  const { wallets } = useWallets();
+  const { client } = useSmartWallets();
+  const privyToken = usePrivySession();
+
+  if (!ready) return <LoadingSpinner />;
 
   if (authenticated) {
-    const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy')
-    const eoaAddress = (embeddedWallet ?? wallets[0])?.address ?? ''
-    const smartAddress = client?.account?.address ?? ''
-    return <ConnectedView eoaAddress={eoaAddress} smartAddress={smartAddress} />
+    const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
+    const eoaAddress = (embeddedWallet ?? wallets[0])?.address ?? "";
+    const smartAddress = client?.account?.address ?? "";
+    return (
+      <ConnectedView
+        eoaAddress={eoaAddress}
+        smartAddress={smartAddress}
+        privyToken={privyToken}
+      />
+    );
   }
 
-  return <LoginView />
+  return <LoginView />;
 }
