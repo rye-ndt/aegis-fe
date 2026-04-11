@@ -13,9 +13,14 @@
     "@privy-io/react-auth": "^3.21.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tma.js/sdk-react": "^3.0.19",
+    "@zerodev/ecdsa-validator": "^5.4.9",
+    "@zerodev/permissions": "^5.6.3",
+    "@zerodev/sdk": "^5.5.10",
+    "permissionless": "^0.2.57",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.2",
+    "viem": "^2.47.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

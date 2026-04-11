@@ -1,6 +1,9 @@
 import React from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
+import { useDelegatedKey, type DelegationState } from './hooks/useDelegatedKey';
+import { PasswordDialog } from './components/PasswordDialog';
+import { DelegationDebugPanel } from './components/DelegationDebugPanel';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -159,10 +162,14 @@ function ConnectedView({
   eoaAddress,
   smartAddress,
   privyToken,
+  delegationState,
+  submitPassword,
 }: {
   eoaAddress: string;
   smartAddress: string;
   privyToken: string | null;
+  delegationState: DelegationState;
+  submitPassword: (password: string) => void;
 }) {
   const { logout } = usePrivy();
 
@@ -215,6 +222,28 @@ function ConnectedView({
       )}
       <AddressRow label="Signer (EOA)" address={eoaAddress} />
       {privyToken && <TokenRow token={privyToken} />}
+
+      {delegationState.status === 'needs_password' && (
+        <PasswordDialog
+          mode={delegationState.mode}
+          onSubmit={submitPassword}
+          error={delegationState.error}
+        />
+      )}
+
+      {delegationState.status === 'processing' && (
+        <p className="text-xs text-white/40 animate-pulse">{delegationState.step}</p>
+      )}
+
+      {delegationState.status === 'error' && (
+        <div className="w-full max-w-sm bg-red-900/20 border border-red-500/30 rounded-xl px-4 py-3">
+          <p className="text-xs text-red-400">{delegationState.message}</p>
+        </div>
+      )}
+
+      {delegationState.status === 'done' && (
+        <DelegationDebugPanel record={delegationState.record} />
+      )}
 
       <button
         onClick={logout}
@@ -288,10 +317,16 @@ export default function App() {
   const { client } = useSmartWallets();
   const privyToken = usePrivySession();
 
+  const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
+  const { state: delegationState, submitPassword } = useDelegatedKey({
+    smartAccountAddress: client?.account?.address ?? '',
+    signerAddress: embeddedWallet?.address ?? '',
+    signerWallet: embeddedWallet,
+  });
+
   if (!ready) return <LoadingSpinner />;
 
   if (authenticated) {
-    const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
     const eoaAddress = (embeddedWallet ?? wallets[0])?.address ?? "";
     const smartAddress = client?.account?.address ?? "";
     return (
@@ -299,6 +334,8 @@ export default function App() {
         eoaAddress={eoaAddress}
         smartAddress={smartAddress}
         privyToken={privyToken}
+        delegationState={delegationState}
+        submitPassword={submitPassword}
       />
     );
   }

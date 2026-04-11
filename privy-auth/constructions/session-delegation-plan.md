@@ -1,7 +1,7 @@
 # Session Delegation — Frontend Implementation Plan
 
 > Date: 2026-04-11  
-> Status: Draft (v2 — ZeroDev on-chain session keys)  
+> Status: Draft (v3 — client-side signing; backend stores public metadata only)  
 > Touches: `src/telegram.d.ts`, `src/App.tsx`, new utils + hooks + components, `.env.local`
 
 ---
@@ -11,14 +11,13 @@
 After a user authenticates with Privy, the app:
 
 1. Checks Telegram CloudStorage for `delegated_key`
-2. If absent: prompts for a password → generates a secp256k1 keypair → encrypts private key → stores in CloudStorage
-3. If present: prompts to unlock → decrypts
-4. Uses the Privy embedded wallet (EOA) to install a **ZeroDev Kernel session key permission on-chain** — one UserOperation, user signs once via Privy's native popup, never again
-5. Serializes the approved session key account (private key embedded in the blob) and POSTs it with the delegation record to the backend
-6. The backend can now use `deserializePermissionAccount` to submit UserOps on behalf of the user **without any further user interaction**
-7. Shows a debug panel with the keypair and permissions
+2. If absent: prompts for a password → generates a secp256k1 keypair → installs a ZeroDev Kernel session key permission **on-chain** (user signs once via Privy popup) → encrypts the serialized permission account blob → stores encrypted blob in CloudStorage
+3. If present: prompts to unlock → decrypts blob → reconstructs signing account via `deserializePermissionAccount`
+4. POSTs **only public metadata** (address, public key, permissions, smart account address) to the backend — no private key, no serialized blob
+5. When the agent needs to act on behalf of the user, the mini app decrypts the session key locally and submits UserOperations **directly to the ZeroDev bundler** — the backend never sees any private key material
+6. Shows a debug panel with the keypair and permissions
 
-The delegated key is **verifiable on-chain** and can independently sign UserOperations from the user's Kernel smart account within the permitted scope.
+The delegated key is **verifiable on-chain**: the Kernel smart contract enforces what the session key is permitted to do. The private key stays encrypted on the user's device in Telegram CloudStorage at all times.
 
 ---
 
@@ -42,6 +41,19 @@ This becomes `VITE_ZERODEV_RPC` in `.env.local`.
 
 ---
 
+## Architecture: where private key material lives
+
+| Location | What it holds |
+|---|---|
+| Telegram CloudStorage (`delegated_key`) | AES-GCM encrypted serialized permission account blob (contains session private key) |
+| React state / memory | Decrypted serialized blob (only while mini app is open and unlocked) |
+| Backend Redis | Public delegation record — address, public key, permissions, smart account address — **no keys** |
+| ZeroDev bundler | Receives signed UserOperations from the frontend |
+
+The backend is never in the signing path. It stores metadata for the agent to know what a session key is authorized to do.
+
+---
+
 ## Data model
 
 Define these types in `src/utils/crypto.ts`. Import from there everywhere else.
@@ -53,18 +65,23 @@ export type Permission = {
   validUntil: number;             // Unix epoch seconds
 };
 
+// Sent to the backend — public metadata only, no private key
 export type DelegationRecord = {
   publicKey: string;                    // 0x-prefixed compressed secp256k1 public key
-  address: `0x${string}`;              // Ethereum address derived from keypair
+  address: `0x${string}`;              // Ethereum address derived from the session keypair
   smartAccountAddress: `0x${string}`; // User's Kernel smart account address
   signerAddress: `0x${string}`;        // User's Privy embedded wallet (EOA)
   permissions: Permission[];
-  serializedSessionKey: string;        // Output of serializePermissionAccount() — includes private key
   grantedAt: number;                   // Unix epoch seconds
 };
-```
 
-`serializedSessionKey` is a base64-encoded blob produced by ZeroDev's `serializePermissionAccount(account, privateKey)`. It embeds the session private key and the full permission plugin configuration. The backend passes this to `deserializePermissionAccount` to get a live signing account with no user interaction required.
+// Keypair used internally during generation; privateKey is never stored raw
+export type Keypair = {
+  privateKey: `0x${string}`;
+  publicKey: string;
+  address: `0x${string}`;
+};
+```
 
 **Hardcoded dev permissions** (one entry, used on first-time generation):
 
@@ -88,9 +105,9 @@ npm install viem permissionless @zerodev/sdk @zerodev/ecdsa-validator @zerodev/p
 
 | Package | Purpose |
 |---|---|
-| `viem` | Public client + wallet client |
+| `viem` | Public client + wallet client + `privateKeyToAccount` |
 | `permissionless` | `walletClientToSmartAccountSigner` — bridges Privy wallet → ZeroDev signer |
-| `@zerodev/sdk` | `createKernelAccount`, `addressToEmptyAccount` |
+| `@zerodev/sdk` | `createKernelAccount`, `createKernelAccountClient`, `addressToEmptyAccount` |
 | `@zerodev/ecdsa-validator` | `signerToEcdsaValidator` |
 | `@zerodev/permissions` | `toPermissionValidator`, `serializePermissionAccount`, `deserializePermissionAccount` |
 
@@ -183,9 +200,9 @@ export function cloudStorageSetItem(key: string, value: string): Promise<void> {
 
 ## Step 5 — Create `src/utils/crypto.ts`
 
-Three responsibilities: keypair generation, AES-GCM encryption/decryption, ZeroDev session key installation.
+Four responsibilities: keypair generation, AES-GCM encryption/decryption, ZeroDev session key installation, ZeroDev signing account reconstruction.
 
-### 5a — Types (at the top of the file, before imports)
+### 5a — Types (at the top of the file)
 
 ```typescript
 export type Permission = {
@@ -200,7 +217,6 @@ export type DelegationRecord = {
   smartAccountAddress: `0x${string}`;
   signerAddress: `0x${string}`;
   permissions: Permission[];
-  serializedSessionKey: string;
   grantedAt: number;
 };
 
@@ -221,19 +237,16 @@ export function generateKeypair(): Keypair {
   const account = privateKeyToAccount(privateKey);
   return { privateKey, publicKey: account.publicKey, address: account.address };
 }
-
-export function keypairFromPrivateKey(privateKey: `0x${string}`): Keypair {
-  const account = privateKeyToAccount(privateKey);
-  return { privateKey, publicKey: account.publicKey, address: account.address };
-}
 ```
 
 ### 5c — Encryption (AES-GCM + PBKDF2, browser native Web Crypto)
 
+These functions encrypt and decrypt any string blob — used to protect the serialized session key stored in CloudStorage.
+
 Blob layout: `[16 bytes salt][12 bytes iv][ciphertext]`, base64-encoded.
 
 ```typescript
-export async function encryptPrivateKey(privateKey: string, password: string): Promise<string> {
+export async function encryptBlob(data: string, password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const keyMaterial = await crypto.subtle.importKey(
@@ -247,7 +260,7 @@ export async function encryptPrivateKey(privateKey: string, password: string): P
     ['encrypt'],
   );
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv }, key, new TextEncoder().encode(privateKey),
+    { name: 'AES-GCM', iv }, key, new TextEncoder().encode(data),
   );
   const result = new Uint8Array(16 + 12 + ciphertext.byteLength);
   result.set(salt, 0);
@@ -256,7 +269,7 @@ export async function encryptPrivateKey(privateKey: string, password: string): P
   return btoa(String.fromCharCode(...result));
 }
 
-export async function decryptPrivateKey(encrypted: string, password: string): Promise<string> {
+export async function decryptBlob(encrypted: string, password: string): Promise<string> {
   const bytes = Uint8Array.from(atob(encrypted), (c) => c.charCodeAt(0));
   const salt = bytes.slice(0, 16);
   const iv = bytes.slice(16, 28);
@@ -282,7 +295,9 @@ export async function decryptPrivateKey(encrypted: string, password: string): Pr
 
 ### 5d — ZeroDev session key installation
 
-This is the core on-chain step. It installs the session key permission on the user's Kernel smart account. The user signs once (Privy popup appears automatically). The output `serializedSessionKey` can be given to the backend to submit UserOps indefinitely without user interaction.
+Installs the session key permission on the user's Kernel smart account. The user signs once (Privy popup appears automatically). Returns the **serialized permission account blob** — a base64 string that embeds the session private key and can reconstruct a full signing account via `deserializePermissionAccount`.
+
+This blob is encrypted and stored in CloudStorage. It is **never sent to the backend**.
 
 ```typescript
 import { createWalletClient, createPublicClient, custom, http } from 'viem';
@@ -316,7 +331,7 @@ export async function installSessionKey(
   // 2. Convert to a ZeroDev-compatible SmartAccountSigner
   const privySigner = walletClientToSmartAccountSigner(walletClient);
 
-  // 3. Public client pointing at the ZeroDev bundler RPC (also serves as node RPC)
+  // 3. Public client pointing at the ZeroDev bundler RPC
   const publicClient = createPublicClient({
     transport: http(zerodevRpc),
     chain: avalancheFuji,
@@ -325,19 +340,18 @@ export async function installSessionKey(
   const entryPoint = getEntryPoint('0.7');
   const kernelVersion = KERNEL_V3_1;
 
-  // 4. Create the ECDSA validator from the Privy EOA — this IS the account owner
+  // 4. ECDSA validator — Privy EOA is the Kernel account owner
   const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
     entryPoint,
     signer: privySigner,
     kernelVersion,
   });
 
-  // 5. Create an empty account from only the session key's *address* (no private key needed here)
+  // 5. Build the permission plugin using only the session key's *address* (no private key needed here)
   const emptySessionAccount = addressToEmptyAccount(sessionKeyAddress);
   const emptySessionKeySigner = await toECDSASigner({ signer: emptySessionAccount });
 
-  // 6. Build the permission plugin that defines what the session key is allowed to do
-  //    toSudoPolicy grants full access — replace with toCallPolicy for tighter restrictions in production
+  // 6. toSudoPolicy grants full access — replace with toCallPolicy in production
   const permissionPlugin = await toPermissionValidator(publicClient, {
     entryPoint,
     signer: emptySessionKeySigner,
@@ -345,25 +359,72 @@ export async function installSessionKey(
     kernelVersion,
   });
 
-  // 7. Create the Kernel account with both the owner (sudo) and session key (regular) plugins
-  //    When the session key later sends a UserOp, Kernel uses the `regular` plugin to validate it
+  // 7. Kernel account with both owner (sudo) and session key (regular) plugins
   const sessionKeyAccount = await createKernelAccount(publicClient, {
     entryPoint,
     plugins: {
       sudo: ecdsaValidator,       // Owner (Privy EOA) — signs this setup UserOp
-      regular: permissionPlugin,  // Session key — used for all future autonomous actions
+      regular: permissionPlugin,  // Session key — validates all future autonomous actions
     },
     kernelVersion,
   });
 
-  // 8. Serialize with the session private key embedded
-  //    This triggers the Privy popup — the owner must sign the UserOp that installs the plugin
-  //    After this, the session key can act autonomously with no further user interaction
+  // 8. Serialize with the session private key embedded.
+  //    This triggers the Privy popup — the owner signs the UserOp that installs the plugin on-chain.
+  //    The returned blob is stored encrypted in CloudStorage; it is never sent to the backend.
   return await serializePermissionAccount(sessionKeyAccount, sessionPrivateKey);
 }
 ```
 
-**What happens on-chain**: The first time `serializePermissionAccount` (or the first session key UserOp) is submitted, the bundler sends a UserOperation that deploys the Kernel account (if not already deployed) and installs the permission plugin in the same tx. The Privy UI popup appears exactly once for the user to sign.
+### 5e — Signing account reconstruction (for future UserOp submission)
+
+After the user unlocks their CloudStorage and decrypts the blob, this function reconstructs a live `KernelAccountClient` ready to submit UserOperations directly to the ZeroDev bundler. No Privy interaction required — the session key signs autonomously.
+
+```typescript
+import { createKernelAccountClient } from '@zerodev/sdk';
+import { deserializePermissionAccount } from '@zerodev/permissions';
+import type { KernelAccountClient } from '@zerodev/sdk';
+
+export async function createSessionKeyClient(
+  serializedBlob: string,
+  zerodevRpc: string,
+): Promise<KernelAccountClient> {
+  const publicClient = createPublicClient({
+    transport: http(zerodevRpc),
+    chain: avalancheFuji,
+  });
+  const entryPoint = getEntryPoint('0.7');
+
+  // Reconstructs the full KernelSmartAccount from the serialized blob.
+  // The blob contains the session private key and all on-chain permission proof data.
+  const account = await deserializePermissionAccount(
+    publicClient,
+    entryPoint,
+    KERNEL_V3_1,
+    serializedBlob,
+  );
+
+  return createKernelAccountClient({
+    account,
+    chain: avalancheFuji,
+    bundlerTransport: http(zerodevRpc),
+    entryPoint,
+  });
+}
+```
+
+Usage — submit a UserOp from the frontend:
+
+```typescript
+const client = await createSessionKeyClient(decryptedBlob, zerodevRpc);
+const txHash = await client.sendUserOperation({
+  callData: await client.account.encodeCalls([{
+    to: targetAddress,
+    value: 0n,
+    data: encodedCalldata,
+  }]),
+});
+```
 
 ---
 
@@ -458,10 +519,6 @@ export function DelegationDebugPanel({ record }: { record: DelegationRecord }) {
       <DebugRow label="Public Key" value={record.publicKey} />
       <DebugRow label="Smart Account" value={record.smartAccountAddress} />
       <DebugRow label="Signer (EOA)" value={record.signerAddress} />
-      <DebugRow
-        label="Serialized Session Key (truncated)"
-        value={record.serializedSessionKey.slice(0, 40) + '…'}
-      />
 
       <p className="text-[10px] font-semibold tracking-widest text-white/30 uppercase px-1 mt-1">
         Granted Permissions
@@ -504,12 +561,10 @@ function DebugRow({ label, value }: { label: string; value: string }) {
 export type DelegationState =
   | { status: 'idle' }
   | { status: 'needs_password'; mode: 'create' | 'unlock'; error?: string }
-  | { status: 'processing'; step: string }   // step: human-readable progress label
+  | { status: 'processing'; step: string }
   | { status: 'done'; record: DelegationRecord }
   | { status: 'error'; message: string };
 ```
-
-The `processing.step` is shown in the UI so the user knows what's happening (the ZeroDev installation triggers a Privy popup; the user should understand why).
 
 ### Full hook
 
@@ -518,9 +573,8 @@ import React from 'react';
 import type { ConnectedWallet } from '@privy-io/react-auth';
 import {
   generateKeypair,
-  keypairFromPrivateKey,
-  encryptPrivateKey,
-  decryptPrivateKey,
+  encryptBlob,
+  decryptBlob,
   installSessionKey,
   type Permission,
   type DelegationRecord,
@@ -536,7 +590,6 @@ const DEFAULT_PERMISSIONS: Permission[] = [{
   validUntil: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
 }];
 
-type State = DelegationState;
 type Action =
   | { type: 'NEEDS_CREATE' }
   | { type: 'NEEDS_UNLOCK'; error?: string }
@@ -544,7 +597,7 @@ type Action =
   | { type: 'DONE'; record: DelegationRecord }
   | { type: 'ERROR'; message: string };
 
-function reducer(_: State, action: Action): State {
+function reducer(_: DelegationState, action: Action): DelegationState {
   switch (action.type) {
     case 'NEEDS_CREATE': return { status: 'needs_password', mode: 'create' };
     case 'NEEDS_UNLOCK': return { status: 'needs_password', mode: 'unlock', error: action.error };
@@ -564,7 +617,9 @@ export function useDelegatedKey(options: {
 } {
   const { smartAccountAddress, signerAddress, signerWallet } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
-  const encryptedRef = React.useRef<string | null>(null);
+
+  // Holds the encrypted CloudStorage value across create/unlock flows
+  const encryptedBlobRef = React.useRef<string | null>(null);
 
   // Check CloudStorage once the smart account address is known
   React.useEffect(() => {
@@ -573,7 +628,7 @@ export function useDelegatedKey(options: {
       try {
         const existing = await cloudStorageGetItem(STORAGE_KEY);
         if (existing) {
-          encryptedRef.current = existing;
+          encryptedBlobRef.current = existing;
           dispatch({ type: 'NEEDS_UNLOCK' });
         } else {
           dispatch({ type: 'NEEDS_CREATE' });
@@ -586,38 +641,60 @@ export function useDelegatedKey(options: {
 
   const submitPassword = React.useCallback(
     async (password: string) => {
-      dispatch({ type: 'PROCESSING', step: 'Preparing keys…' });
+      dispatch({ type: 'PROCESSING', step: 'Preparing…' });
       try {
-        let keypair: ReturnType<typeof generateKeypair>;
+        const zerodevRpc = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
+        if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
 
-        if (encryptedRef.current) {
-          // UNLOCK: decrypt existing key
-          let privateKey: string;
+        let serializedBlob: string;
+        let record: DelegationRecord;
+
+        if (encryptedBlobRef.current) {
+          // ── UNLOCK: decrypt the stored blob and reconstruct public record ────────
+          dispatch({ type: 'PROCESSING', step: 'Decrypting session key…' });
           try {
-            privateKey = await decryptPrivateKey(encryptedRef.current, password);
+            serializedBlob = await decryptBlob(encryptedBlobRef.current, password);
           } catch {
             dispatch({ type: 'NEEDS_UNLOCK', error: 'Wrong password, please try again' });
             return;
           }
-          keypair = keypairFromPrivateKey(privateKey as `0x${string}`);
-        } else {
-          // CREATE: generate → encrypt → persist
-          dispatch({ type: 'PROCESSING', step: 'Generating keypair…' });
-          keypair = generateKeypair();
-          const encrypted = await encryptPrivateKey(keypair.privateKey, password);
-          await cloudStorageSetItem(STORAGE_KEY, encrypted);
-          encryptedRef.current = encrypted;
+
+          // The record metadata was posted to the backend at creation time.
+          // On unlock we only need the public fields for the debug panel.
+          // Fetch from backend so we don't need to store them separately.
+          const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+          // We derive the session key address from the blob via deserializePermissionAccount
+          // for the purpose of the debug panel — handled in a future step.
+          // For now, emit done with minimal info; the client is ready to sign.
+          dispatch({ type: 'PROCESSING', step: 'Session key ready.' });
+
+          // TODO (future): call createSessionKeyClient(serializedBlob, zerodevRpc) here
+          // and store the client in a ref so other components can call sendUserOperation.
+
+          // Reconstruct a minimal record for the debug panel from CloudStorage metadata.
+          // Full record can be fetched from backend via GET /permissions?public_key=address.
+          // For now, dispatch done with whatever we have.
+          record = {
+            publicKey: '',         // fetched from backend in future step
+            address: '0x',         // fetched from backend in future step
+            smartAccountAddress: smartAccountAddress as `0x${string}`,
+            signerAddress: signerAddress as `0x${string}`,
+            permissions: DEFAULT_PERMISSIONS,
+            grantedAt: 0,
+          };
+          dispatch({ type: 'DONE', record });
+          return;
         }
 
-        // Install the session key on the Kernel smart account
-        // This triggers the Privy UI popup asking the user to sign once
-        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain… (approve in Privy popup)' });
+        // ── CREATE: generate keypair → install on-chain → encrypt → store ─────────
+        dispatch({ type: 'PROCESSING', step: 'Generating session keypair…' });
+        const keypair = generateKeypair();
+
         if (!signerWallet) throw new Error('Privy embedded wallet not found');
         const provider = await signerWallet.getEthereumProvider();
-        const zerodevRpc = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
-        if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
 
-        const serializedSessionKey = await installSessionKey(
+        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain… (approve in Privy popup)' });
+        serializedBlob = await installSessionKey(
           provider as Parameters<typeof installSessionKey>[0],
           signerAddress as `0x${string}`,
           keypair.privateKey,
@@ -625,25 +702,30 @@ export function useDelegatedKey(options: {
           zerodevRpc,
         );
 
-        const permissions = DEFAULT_PERMISSIONS;
-        const record: DelegationRecord = {
+        // Encrypt the serialized blob (which contains the private key) before persisting
+        dispatch({ type: 'PROCESSING', step: 'Encrypting and storing session key…' });
+        const encryptedBlob = await encryptBlob(serializedBlob, password);
+        await cloudStorageSetItem(STORAGE_KEY, encryptedBlob);
+        encryptedBlobRef.current = encryptedBlob;
+
+        // Build the public delegation record — no private key, no serialized blob
+        record = {
           publicKey: keypair.publicKey,
           address: keypair.address,
           smartAccountAddress: smartAccountAddress as `0x${string}`,
           signerAddress: signerAddress as `0x${string}`,
-          permissions,
-          serializedSessionKey,
+          permissions: DEFAULT_PERMISSIONS,
           grantedAt: Math.floor(Date.now() / 1000),
         };
 
-        // POST to backend
-        dispatch({ type: 'PROCESSING', step: 'Persisting to backend…' });
+        // POST public metadata to backend
+        dispatch({ type: 'PROCESSING', step: 'Persisting public metadata to backend…' });
         const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
         try {
           const resp = await fetch(`${backendUrl}/persistent`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(record),
+            body: JSON.stringify(record),   // serializedBlob is NOT included
           });
           if (!resp.ok) console.warn('[Delegation] Backend /persistent returned', resp.status);
         } catch (fetchErr) {
@@ -653,7 +735,7 @@ export function useDelegatedKey(options: {
         // Debug logging
         console.log('[Delegation] Keypair:', { address: record.address, publicKey: record.publicKey });
         console.log('[Delegation] Permissions:', record.permissions);
-        console.log('[Delegation] Serialized session key (first 80 chars):', record.serializedSessionKey.slice(0, 80));
+        console.log('[Delegation] Session key installed on-chain. Blob encrypted and stored in CloudStorage.');
 
         dispatch({ type: 'DONE', record });
       } catch (err) {
@@ -666,8 +748,10 @@ export function useDelegatedKey(options: {
   return { state, submitPassword };
 }
 
-export type { DelegationRecord } from '../utils/crypto';
+export type { DelegationState, DelegationRecord } from '../utils/crypto';
 ```
+
+**Note on the unlock path**: The minimal record shown in the debug panel on unlock is a known gap. A follow-up step should call `GET /permissions?public_key={address}` from the backend (which requires knowing the session key address). The address can be recovered by calling `deserializePermissionAccount` and reading `account.address`. This is left as a `TODO` comment in the hook because `createSessionKeyClient` (which calls `deserializePermissionAccount`) is the natural place to get it, and wiring that up is part of the UserOp submission feature — not the onboarding flow.
 
 ---
 
@@ -794,7 +878,7 @@ Replace `{your-project-id}` with the ID from https://dashboard.zerodev.app. Ensu
 
 ## Dev-mode browser testing
 
-Telegram CloudStorage is unavailable in a plain browser. Add a temporary mock at the top of `telegramStorage.ts`:
+Telegram CloudStorage is unavailable in a plain browser. Add a temporary mock at the top of `telegramStorage.ts` (remove before deploying):
 
 ```typescript
 // TEMPORARY DEV MOCK — remove before deploying
@@ -815,42 +899,29 @@ if (!window.Telegram?.WebApp?.CloudStorage) {
 }
 ```
 
-Remove before deploying to Telegram.
+---
+
+## Security properties
+
+| Property | Status |
+|---|---|
+| Session private key never sent to backend | ✅ Only the public address, public key, and permissions metadata are POSTed |
+| Session private key never stored in plaintext | ✅ Always AES-GCM encrypted before CloudStorage write |
+| User's Privy private key never touched | ✅ Only the EIP-1193 provider interface is used; private key stays in Privy |
+| On-chain permission scope enforced by contract | ✅ Kernel validates every session key UserOp against the installed permission plugin |
+| Backend compromise exposes nothing sensitive | ✅ Redis contains only public addresses and permission metadata |
+
+**Remaining risk**: `toSudoPolicy` grants the session key unlimited access within the Kernel account. Replace with `toCallPolicy` scoped to specific token contracts and amounts before production.
 
 ---
 
-## Security note on `serializedSessionKey`
+## How UserOp submission works (future step)
 
-`serializePermissionAccount(account, sessionPrivateKey)` embeds the session key's private key in the serialized blob. The backend stores this in Redis. This means:
+When the bot sends the user a pending action (e.g. "execute swap"), the mini app:
 
-- Anyone with Redis access can extract the session key private key
-- The session key is limited to the on-chain permissions you set (`toSudoPolicy` for now, `toCallPolicy` in production)
-- For production: replace `toSudoPolicy` with `toCallPolicy` scoped to specific token addresses and amounts
-- For production: consider encrypting the serialized blob before storing in Redis
+1. Decrypts the serialized blob from CloudStorage (user enters password or it's in memory from this session)
+2. Calls `createSessionKeyClient(serializedBlob, zerodevRpc)` → gets a `KernelAccountClient`
+3. Calls `client.sendUserOperation(...)` with the calldata prepared by the backend
+4. Reports the tx hash to the backend
 
----
-
-## Expected debug output
-
-Console after first successful setup:
-```
-[Delegation] Keypair: { address: '0x1234...', publicKey: '0x02ab...' }
-[Delegation] Permissions: [{ tokenAddress: '0xEeee...', maxAmount: '1000000000000000000', validUntil: 1749... }]
-[Delegation] Serialized session key (first 80 chars): eyJhY2NvdW50QWRkcmVzcyI6IjB4...
-```
-
-UI (DelegationDebugPanel):
-```
-DEBUG — DELEGATION KEY (ON-CHAIN SESSION KEY ACTIVE)
-
-DELEGATED ADDRESS      0x1234abcd...
-PUBLIC KEY             0x02abc123...
-SMART ACCOUNT          0x5678ef...
-SIGNER (EOA)           0x9abc12...
-SERIALIZED SESSION KEY (TRUNCATED)   eyJhY2NvdW50QWRkcmVzcyI6IjB4...
-
-GRANTED PERMISSIONS
-Token: 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
-Max: 1000000000000000000 wei
-Until: 2026-05-11T00:00:00.000Z
-```
+The backend prepares calldata and awaits the result. It never signs anything.

@@ -1,4 +1,23 @@
 // Telegram WebApp global type declarations
+interface TelegramCloudStorageValues {
+  [key: string]: string;
+}
+
+interface TelegramCloudStorage {
+  setItem(
+    key: string,
+    value: string,
+    callback?: (error: string | null, stored: boolean) => void,
+  ): void;
+  getItem(key: string, callback: (error: string | null, value: string) => void): void;
+  getItems(
+    keys: string[],
+    callback: (error: string | null, values: TelegramCloudStorageValues) => void,
+  ): void;
+  removeItem(key: string, callback?: (error: string | null, removed: boolean) => void): void;
+  getKeys(callback: (error: string | null, keys: string[]) => void): void;
+}
+
 interface TelegramWebApp {
   ready(): void
   expand(): void
@@ -23,6 +42,7 @@ interface TelegramWebApp {
   isExpanded: boolean
   viewportHeight: number
   viewportStableHeight: number
+  CloudStorage: TelegramCloudStorage;
 }
 
 interface Window {
