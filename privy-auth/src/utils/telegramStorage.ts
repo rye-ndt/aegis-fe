@@ -9,16 +9,24 @@ function cloudStorageSupported(): boolean {
 }
 
 if (!cloudStorageSupported()) {
-  const store = new Map<string, string>();
+  const LS_PREFIX = '__tg_cs__';
+  const lsGet = (k: string) => localStorage.getItem(LS_PREFIX + k) ?? '';
+  const lsSet = (k: string, v: string) => localStorage.setItem(LS_PREFIX + k, v);
+  const lsDel = (k: string) => localStorage.removeItem(LS_PREFIX + k);
+  const lsKeys = () =>
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith(LS_PREFIX))
+      .map((k) => k.slice(LS_PREFIX.length));
+
   (window as any).Telegram = {
     WebApp: {
       ...(window.Telegram?.WebApp ?? {}),
       CloudStorage: {
-        setItem: (k: string, v: string, cb?: (e: null, s: boolean) => void) => { store.set(k, v); cb?.(null, true); },
-        getItem: (k: string, cb: (e: null, v: string) => void) => cb(null, store.get(k) ?? ''),
-        getItems: (ks: string[], cb: (e: null, v: Record<string, string>) => void) => cb(null, Object.fromEntries(ks.map(k => [k, store.get(k) ?? '']))),
-        removeItem: (k: string, cb?: (e: null, r: boolean) => void) => { store.delete(k); cb?.(null, true); },
-        getKeys: (cb: (e: null, ks: string[]) => void) => cb(null, [...store.keys()]),
+        setItem: (k: string, v: string, cb?: (e: null, s: boolean) => void) => { lsSet(k, v); cb?.(null, true); },
+        getItem: (k: string, cb: (e: null, v: string) => void) => cb(null, lsGet(k)),
+        getItems: (ks: string[], cb: (e: null, v: Record<string, string>) => void) => cb(null, Object.fromEntries(ks.map(k => [k, lsGet(k)]))),
+        removeItem: (k: string, cb?: (e: null, r: boolean) => void) => { lsDel(k); cb?.(null, true); },
+        getKeys: (cb: (e: null, ks: string[]) => void) => cb(null, lsKeys()),
       },
     },
   };

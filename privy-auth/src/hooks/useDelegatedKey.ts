@@ -52,12 +52,15 @@ export function useDelegatedKey(options: {
 }): {
   state: DelegationState;
   submitPassword: (password: string) => void;
+  serializedBlob: string | null;
 } {
   const { smartAccountAddress, signerAddress, signerWallet, onPendingSigning } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
 
   // Holds the encrypted CloudStorage value across create/unlock flows
   const encryptedBlobRef = React.useRef<string | null>(null);
+  // Holds the decrypted serialized blob after unlock/create; exposed for SSE signing
+  const serializedBlobRef = React.useRef<string | null>(null);
 
   // Check CloudStorage once the smart account address is known
   React.useEffect(() => {
@@ -100,6 +103,7 @@ export function useDelegatedKey(options: {
             dispatch({ type: 'NEEDS_UNLOCK', error: 'Wrong password, please try again' });
             return;
           }
+          serializedBlobRef.current = serializedBlob;
 
           // The record metadata was posted to the backend at creation time.
           // TODO (future): GET ${VITE_BACKEND_URL}/permissions?address=<session_key_address>
@@ -151,6 +155,7 @@ export function useDelegatedKey(options: {
           keypair.address,
           zerodevRpc,
         );
+        serializedBlobRef.current = serializedBlob;
 
         // Encrypt the serialized blob (which contains the private key) before persisting
         dispatch({ type: 'PROCESSING', step: 'Encrypting and storing session key…' });
@@ -208,7 +213,7 @@ export function useDelegatedKey(options: {
     [smartAccountAddress, signerAddress, signerWallet],
   );
 
-  return { state, submitPassword };
+  return { state, submitPassword, serializedBlob: serializedBlobRef.current };
 }
 
 export type { DelegationRecord } from '../utils/crypto';

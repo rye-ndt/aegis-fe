@@ -3,9 +3,12 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { useDelegatedKey, type DelegationState } from './hooks/useDelegatedKey';
 import { usePendingSigning } from './hooks/usePendingSigning';
+import { useSigningRequests } from './hooks/useSigningRequests';
 import { PasswordDialog } from './components/PasswordDialog';
 import { DelegationDebugPanel } from './components/DelegationDebugPanel';
 import { SigningApprovalModal } from './components/SigningApprovalModal';
+import { SigningRequestModal } from './components/SigningRequestModal';
+import type { PendingSigningRequest as BotSigningRequest } from './hooks/useSigningRequests';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -146,6 +149,7 @@ function TokenRow({ getToken, preview }: { getToken: () => Promise<string | null
 function usePrivySession() {
   const { authenticated, getAccessToken } = usePrivy();
   const [privyToken, setPrivyToken] = React.useState<string | null>(null);
+  const [backendJwt, setBackendJwt] = React.useState<string | null>(null);
 
   // Fetch access token once after the user authenticates (used for preview + Telegram auto-send)
   React.useEffect(() => {
@@ -153,13 +157,33 @@ function usePrivySession() {
     getAccessToken().then(setPrivyToken);
   }, [authenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Exchange Privy token for backend JWT via POST /auth/privy
+  React.useEffect(() => {
+    if (!privyToken) return;
+    const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+    if (!backendUrl) return;
+    fetch(`${backendUrl}/auth/privy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: privyToken }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((body: { jwt?: string; token?: string }) => {
+        const jwt = body.jwt ?? body.token ?? null;
+        setBackendJwt(jwt);
+      })
+      .catch((err) => {
+        console.warn('[Auth] Could not exchange Privy token for backend JWT:', err);
+      });
+  }, [privyToken]);
+
   // Relay token to the Telegram bot automatically when running inside a mini app
   React.useEffect(() => {
     if (!privyToken || !window.Telegram?.WebApp?.sendData) return;
     window.Telegram.WebApp.sendData(JSON.stringify({ privyToken }));
   }, [privyToken]);
 
-  return { privyToken, getAccessToken };
+  return { privyToken, getAccessToken, backendJwt };
 }
 
 // ─── Views ────────────────────────────────────────────────────────────────────
@@ -172,6 +196,7 @@ function ConnectedView({
   delegationState,
   submitPassword,
   pendingSigning,
+  pendingBotRequest,
 }: {
   eoaAddress: string;
   smartAddress: string;
@@ -180,6 +205,7 @@ function ConnectedView({
   delegationState: DelegationState;
   submitPassword: (password: string) => void;
   pendingSigning: ReturnType<typeof usePendingSigning>['pending'];
+  pendingBotRequest: BotSigningRequest | null;
 }) {
   const { logout } = usePrivy();
 
@@ -268,6 +294,13 @@ function ConnectedView({
           onClose={() => {/* pending auto-clears after approve/reject */}}
         />
       )}
+
+      {pendingBotRequest && (
+        <SigningRequestModal
+          request={pendingBotRequest}
+          onClose={() => {/* pending auto-clears after approve/reject */}}
+        />
+      )}
     </div>
   );
 }
@@ -332,16 +365,22 @@ export default function App() {
   const { ready, authenticated } = usePrivy();
   const { wallets } = useWallets();
   const { client } = useSmartWallets();
-  const { privyToken, getAccessToken } = usePrivySession();
+  const { privyToken, getAccessToken, backendJwt } = usePrivySession();
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   console.log('[Aegis] EOA:', embeddedWallet?.address, '| Smart wallet:', client?.account?.address);
   const { pending: pendingSigning, onPending } = usePendingSigning();
-  const { state: delegationState, submitPassword } = useDelegatedKey({
+  const { state: delegationState, submitPassword, serializedBlob } = useDelegatedKey({
     smartAccountAddress: client?.account?.address ?? '',
     signerAddress: embeddedWallet?.address ?? '',
     signerWallet: embeddedWallet,
     onPendingSigning: onPending,
+  });
+
+  const { pending: pendingBotRequest } = useSigningRequests({
+    serializedBlob: delegationState.status === 'done' ? serializedBlob : null,
+    jwtToken: backendJwt,
+    zerodevRpc: (import.meta.env.VITE_ZERODEV_RPC as string) ?? '',
   });
 
   if (!ready) return <LoadingSpinner />;
@@ -358,6 +397,7 @@ export default function App() {
         delegationState={delegationState}
         submitPassword={submitPassword}
         pendingSigning={pendingSigning}
+        pendingBotRequest={pendingBotRequest}
       />
     );
   }
