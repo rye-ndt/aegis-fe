@@ -1,7 +1,7 @@
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, createPublicClient, custom, http } from 'viem';
 import { avalancheFuji } from 'viem/chains';
-import { walletClientToSmartAccountSigner } from 'permissionless';
+import { toOwner } from 'permissionless/utils';
 import { signerToEcdsaValidator } from '@zerodev/ecdsa-validator';
 import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount } from '@zerodev/sdk';
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
@@ -116,7 +116,7 @@ export async function installSessionKey(
   });
 
   // 2. Convert to a ZeroDev-compatible SmartAccountSigner
-  const privySigner = walletClientToSmartAccountSigner(walletClient);
+  const privySigner = await toOwner({ owner: walletClient });
 
   // 3. Public client pointing at the ZeroDev bundler RPC
   const publicClient = createPublicClient({

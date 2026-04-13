@@ -2,8 +2,10 @@ import React from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { useDelegatedKey, type DelegationState } from './hooks/useDelegatedKey';
+import { usePendingSigning } from './hooks/usePendingSigning';
 import { PasswordDialog } from './components/PasswordDialog';
 import { DelegationDebugPanel } from './components/DelegationDebugPanel';
+import { SigningApprovalModal } from './components/SigningApprovalModal';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -99,12 +101,16 @@ function AddressRow({ label, address }: { label: string; address: string }) {
   );
 }
 
-function TokenRow({ token }: { token: string }) {
+function TokenRow({ getToken, preview }: { getToken: () => Promise<string | null>; preview: string }) {
   const [copied, setCopied] = React.useState(false);
 
-  const copy = () => {
+  const copy = async () => {
     try {
-      navigator.clipboard.writeText(token);
+      // Always fetch a fresh token at copy-time so it isn't stale by the time
+      // the user sends it to the bot.
+      const fresh = await getToken();
+      if (!fresh) return;
+      await navigator.clipboard.writeText(fresh);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -119,7 +125,7 @@ function TokenRow({ token }: { token: string }) {
       </p>
       <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-4 py-3">
         <p className="font-mono text-xs text-white/80 tracking-wide truncate flex-1">
-          {token.slice(0, 32)}…
+          {preview.slice(0, 32)}…
         </p>
         <button
           onClick={copy}
@@ -141,7 +147,7 @@ function usePrivySession() {
   const { authenticated, getAccessToken } = usePrivy();
   const [privyToken, setPrivyToken] = React.useState<string | null>(null);
 
-  // Fetch access token once after the user authenticates
+  // Fetch access token once after the user authenticates (used for preview + Telegram auto-send)
   React.useEffect(() => {
     if (!authenticated) return;
     getAccessToken().then(setPrivyToken);
@@ -153,7 +159,7 @@ function usePrivySession() {
     window.Telegram.WebApp.sendData(JSON.stringify({ privyToken }));
   }, [privyToken]);
 
-  return privyToken;
+  return { privyToken, getAccessToken };
 }
 
 // ─── Views ────────────────────────────────────────────────────────────────────
@@ -162,14 +168,18 @@ function ConnectedView({
   eoaAddress,
   smartAddress,
   privyToken,
+  getAccessToken,
   delegationState,
   submitPassword,
+  pendingSigning,
 }: {
   eoaAddress: string;
   smartAddress: string;
   privyToken: string | null;
+  getAccessToken: () => Promise<string | null>;
   delegationState: DelegationState;
   submitPassword: (password: string) => void;
+  pendingSigning: ReturnType<typeof usePendingSigning>['pending'];
 }) {
   const { logout } = usePrivy();
 
@@ -221,7 +231,7 @@ function ConnectedView({
         <AddressRow label="Smart Wallet" address={smartAddress} />
       )}
       <AddressRow label="Signer (EOA)" address={eoaAddress} />
-      {privyToken && <TokenRow token={privyToken} />}
+      {privyToken && <TokenRow getToken={getAccessToken} preview={privyToken} />}
 
       {delegationState.status === 'needs_password' && (
         <PasswordDialog
@@ -251,6 +261,13 @@ function ConnectedView({
       >
         Disconnect
       </button>
+
+      {pendingSigning && (
+        <SigningApprovalModal
+          request={pendingSigning}
+          onClose={() => {/* pending auto-clears after approve/reject */}}
+        />
+      )}
     </div>
   );
 }
@@ -315,13 +332,16 @@ export default function App() {
   const { ready, authenticated } = usePrivy();
   const { wallets } = useWallets();
   const { client } = useSmartWallets();
-  const privyToken = usePrivySession();
+  const { privyToken, getAccessToken } = usePrivySession();
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
+  console.log('[Aegis] EOA:', embeddedWallet?.address, '| Smart wallet:', client?.account?.address);
+  const { pending: pendingSigning, onPending } = usePendingSigning();
   const { state: delegationState, submitPassword } = useDelegatedKey({
     smartAccountAddress: client?.account?.address ?? '',
     signerAddress: embeddedWallet?.address ?? '',
     signerWallet: embeddedWallet,
+    onPendingSigning: onPending,
   });
 
   if (!ready) return <LoadingSpinner />;
@@ -334,8 +354,10 @@ export default function App() {
         eoaAddress={eoaAddress}
         smartAddress={smartAddress}
         privyToken={privyToken}
+        getAccessToken={getAccessToken}
         delegationState={delegationState}
         submitPassword={submitPassword}
+        pendingSigning={pendingSigning}
       />
     );
   }

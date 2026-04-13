@@ -10,6 +10,7 @@ import {
 } from '../utils/crypto';
 import { cloudStorageGetItem, cloudStorageSetItem } from '../utils/telegramStorage';
 import { toErrorMessage } from '../utils/toErrorMessage';
+import { createInterceptingProvider, type PendingSigningRequest } from '../utils/signingInterceptor';
 
 const STORAGE_KEY = 'delegated_key';
 
@@ -27,7 +28,7 @@ export type DelegationState =
   | { status: 'error'; message: string };
 
 type Action =
-  | { type: 'NEEDS_CREATE' }
+  | { type: 'NEEDS_CREATE'; error?: string }
   | { type: 'NEEDS_UNLOCK'; error?: string }
   | { type: 'PROCESSING'; step: string }
   | { type: 'DONE'; record: DelegationRecord }
@@ -35,7 +36,7 @@ type Action =
 
 function reducer(_: DelegationState, action: Action): DelegationState {
   switch (action.type) {
-    case 'NEEDS_CREATE': return { status: 'needs_password', mode: 'create' };
+    case 'NEEDS_CREATE': return { status: 'needs_password', mode: 'create', error: action.error };
     case 'NEEDS_UNLOCK': return { status: 'needs_password', mode: 'unlock', error: action.error };
     case 'PROCESSING': return { status: 'processing', step: action.step };
     case 'DONE': return { status: 'done', record: action.record };
@@ -47,11 +48,12 @@ export function useDelegatedKey(options: {
   smartAccountAddress: string;
   signerAddress: string;
   signerWallet: ConnectedWallet | undefined;
+  onPendingSigning: (req: PendingSigningRequest) => void;
 }): {
   state: DelegationState;
   submitPassword: (password: string) => void;
 } {
-  const { smartAccountAddress, signerAddress, signerWallet } = options;
+  const { smartAccountAddress, signerAddress, signerWallet, onPendingSigning } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
 
   // Holds the encrypted CloudStorage value across create/unlock flows
@@ -74,6 +76,10 @@ export function useDelegatedKey(options: {
       }
     })();
   }, [smartAccountAddress]);
+
+  // Stable ref so onPendingSigning changes don't recreate submitPassword
+  const onPendingSigningRef = React.useRef(onPendingSigning);
+  React.useEffect(() => { onPendingSigningRef.current = onPendingSigning; }, [onPendingSigning]);
 
   const submitPassword = React.useCallback(
     async (password: string) => {
@@ -124,11 +130,20 @@ export function useDelegatedKey(options: {
         // ── CREATE: generate keypair → install on-chain → encrypt → store ─────────
         dispatch({ type: 'PROCESSING', step: 'Generating session keypair…' });
         const keypair = generateKeypair();
+        console.log('[Delegation] Generated keypair:', {
+          address: keypair.address,
+          publicKey: keypair.publicKey,
+          privateKey: keypair.privateKey, // WARNING: remove before production
+        });
 
         if (!signerWallet) throw new Error('Privy embedded wallet not found');
-        const provider = await signerWallet.getEthereumProvider();
+        const rawProvider = await signerWallet.getEthereumProvider();
+        const provider = createInterceptingProvider(
+          rawProvider as Parameters<typeof createInterceptingProvider>[0],
+          (req) => onPendingSigningRef.current(req),
+        );
 
-        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain… (approve in Privy popup)' });
+        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain… (approve in wallet)' });
         serializedBlob = await installSessionKey(
           provider as Parameters<typeof installSessionKey>[0],
           signerAddress as `0x${string}`,
@@ -174,6 +189,19 @@ export function useDelegatedKey(options: {
 
         dispatch({ type: 'DONE', record });
       } catch (err) {
+        // User rejected the signing request — return to password prompt with a helpful message
+        const isUserRejection =
+          (err as { code?: number })?.code === 4001 ||
+          (err instanceof Error && err.message.includes('User rejected'));
+        if (isUserRejection) {
+          // Determine mode: if no encrypted blob existed we were in CREATE flow
+          const mode = encryptedBlobRef.current ? 'NEEDS_UNLOCK' : 'NEEDS_CREATE';
+          dispatch({
+            type: mode,
+            error: 'You rejected the signing request — try again.',
+          });
+          return;
+        }
         dispatch({ type: 'ERROR', message: toErrorMessage(err) });
       }
     },

@@ -1,5 +1,14 @@
-// TEMPORARY DEV MOCK — remove before deploying
-if (!window.Telegram?.WebApp?.CloudStorage) {
+// CloudStorage requires Telegram WebApp v6.9+. Install an in-memory mock when:
+//   - CloudStorage is absent entirely (dev browser, non-Telegram context), OR
+//   - the runtime version is below 6.9 (stub object present but callbacks never fire)
+function cloudStorageSupported(): boolean {
+  const cs = window.Telegram?.WebApp?.CloudStorage;
+  if (!cs) return false;
+  const version = parseFloat(window.Telegram?.WebApp?.version ?? '0');
+  return version >= 6.9;
+}
+
+if (!cloudStorageSupported()) {
   const store = new Map<string, string>();
   (window as any).Telegram = {
     WebApp: {
