@@ -1,4 +1,3 @@
-// src/components/TelegramAutoLogin.tsx
 import React from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 
@@ -60,6 +59,9 @@ export function TelegramAutoLogin() {
         // Intentionally swallow — LoginView will still render for manual login.
       }
     })();
+  // `loginWithTelegram` is included in deps so the lint rule is satisfied.
+  // Re-entry is prevented by `attemptedRef`, so a reference change from Privy's
+  // internals will never trigger a second login attempt.
   }, [ready, authenticated, loginWithTelegram]);
 
   return null;

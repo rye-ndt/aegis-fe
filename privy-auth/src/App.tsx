@@ -151,7 +151,7 @@ function usePrivySession() {
   const [privyToken, setPrivyToken] = React.useState<string | null>(null);
   const [backendJwt, setBackendJwt] = React.useState<string | null>(null);
 
-  // Fetch access token once after the user authenticates (used for preview + Telegram auto-send)
+  // Fetch a fresh Privy access token once authentication is confirmed.
   React.useEffect(() => {
     if (!authenticated) return;
     getAccessToken().then(setPrivyToken);
@@ -176,7 +176,6 @@ function usePrivySession() {
         console.warn('[Auth] Could not exchange Privy token for backend JWT:', err);
       });
   }, [privyToken]);
-
 
   return { privyToken, getAccessToken, backendJwt };
 }
@@ -363,7 +362,6 @@ export default function App() {
   const { privyToken, getAccessToken, backendJwt } = usePrivySession();
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  console.log('[Aegis] EOA:', embeddedWallet?.address, '| Smart wallet:', client?.account?.address);
   const { pending: pendingSigning, onPending } = usePendingSigning();
   const { state: delegationState, submitPassword, serializedBlob } = useDelegatedKey({
     smartAccountAddress: client?.account?.address ?? '',
@@ -377,6 +375,13 @@ export default function App() {
     jwtToken: backendJwt,
     zerodevRpc: (import.meta.env.VITE_ZERODEV_RPC as string) ?? '',
   });
+
+  // Debug: log wallet addresses whenever they change (dev only).
+  React.useEffect(() => {
+    if (import.meta.env.DEV) {
+      console.log('[Aegis] EOA:', embeddedWallet?.address, '| Smart wallet:', client?.account?.address);
+    }
+  }, [embeddedWallet?.address, client?.account?.address]);
 
   if (!ready) return <LoadingSpinner />;
 
@@ -397,10 +402,12 @@ export default function App() {
     );
   }
 
-  // Suppress LoginView briefly when inside Telegram while TelegramAutoLogin is in flight.
-  // This prevents the Google login button from flashing before auto-login completes.
-  const isTmaContext = Boolean(window.Telegram?.WebApp);
-  const showLogin = !isTmaContext || authenticated;
+  // Suppress LoginView while TelegramAutoLogin is in flight inside a Telegram WebView.
+  // Once authenticated flips to true, the branch above takes over; this spinner
+  // only shows during the brief auto-login window.
+  if (window.Telegram?.WebApp) {
+    return <LoadingSpinner />;
+  }
 
-  return showLogin ? <LoginView /> : <LoadingSpinner />;
+  return <LoginView />;
 }
