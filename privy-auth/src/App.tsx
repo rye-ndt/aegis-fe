@@ -177,11 +177,6 @@ function usePrivySession() {
       });
   }, [privyToken]);
 
-  // Relay token to the Telegram bot automatically when running inside a mini app
-  React.useEffect(() => {
-    if (!privyToken || !window.Telegram?.WebApp?.sendData) return;
-    window.Telegram.WebApp.sendData(JSON.stringify({ privyToken }));
-  }, [privyToken]);
 
   return { privyToken, getAccessToken, backendJwt };
 }
@@ -402,5 +397,10 @@ export default function App() {
     );
   }
 
-  return <LoginView />;
+  // Suppress LoginView briefly when inside Telegram while TelegramAutoLogin is in flight.
+  // This prevents the Google login button from flashing before auto-login completes.
+  const isTmaContext = Boolean(window.Telegram?.WebApp);
+  const showLogin = !isTmaContext || authenticated;
+
+  return showLogin ? <LoginView /> : <LoadingSpinner />;
 }

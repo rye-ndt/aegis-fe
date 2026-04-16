@@ -4,6 +4,7 @@ import { PrivyProvider } from '@privy-io/react-auth'
 import { SmartWalletsProvider } from '@privy-io/react-auth/smart-wallets'
 import './index.css'
 import App from './App.tsx'
+import { TelegramAutoLogin } from './components/TelegramAutoLogin.tsx'
 
 // Expand Telegram Mini App to full height immediately
 if (window.Telegram?.WebApp) {
@@ -18,7 +19,7 @@ createRoot(document.getElementById('root')!).render(
     <PrivyProvider
       appId={import.meta.env.VITE_PRIVY_APP_ID ?? 'clxxxxxxxxxxxxxxxxxxxxx'}
       config={{
-        loginMethods: ['google'],
+        loginMethods: ['google', 'telegram'],
         appearance: {
           theme: 'dark',
           accentColor: '#7c3aed',
@@ -32,6 +33,7 @@ createRoot(document.getElementById('root')!).render(
       }}
     >
       <SmartWalletsProvider>
+        <TelegramAutoLogin />
         <App />
       </SmartWalletsProvider>
     </PrivyProvider>
