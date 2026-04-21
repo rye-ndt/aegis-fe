@@ -58,3 +58,10 @@
 - **Commands Executed**: None (direct file edits).
 - **Tests Run & Results**: Successfully implemented `GET /sign-requests/:id` to fetch the payload directly on mount and circumvent SSE timing edges.
 - **Known Risks, Assumptions, or Limitations**: Added Set-based deduplication logic in `useSigningRequests.ts` to prevent race conditions where both the explicit HTTP fetch and the SSE stream attempt to queue the exact same modal on the frontend UI.
+
+## 2026-04-21T11:45:00+07:00
+- **Task Summary**: Implemented the Telegram Success View to replace the Connected View when inside the Telegram Mini App after a successful login flow, strictly following the `login-flow-revamp-plan.md`.
+- **Files Modified**: `src/App.tsx`
+- **Commands Executed**: `/bin/zsh -c -l "npm run build 2>&1 | grep App.tsx"`
+- **Tests Run & Results**: Run `npm run build` to verify type safety. The newly added code in `App.tsx` compiled successfully and no new TS errors were introduced (command exited with 1 because grep found no output, which means 0 errors in App.tsx).
+- **Known Risks, Assumptions, or Limitations**: Auto-closing the Mini App using `window.Telegram?.WebApp?.close?.()` relies on the user launching through the Telegram client. A configurable fallback env `VITE_DISABLE_AUTO_CLOSE` and constant `TELEGRAM_SUCCESS_AUTO_CLOSE_MS = 2000` are correctly applied.

@@ -340,12 +340,39 @@ function LoginView() {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 const TMA_AUTO_LOGIN_TIMEOUT_MS = 4000;
+const TELEGRAM_SUCCESS_AUTO_CLOSE_MS = 2000;
 
 // telegram-web-app.js is always loaded in index.html, so window.Telegram.WebApp
 // is defined even in a regular browser. Only trust it when initData is non-empty,
 // which only happens inside a real Telegram Mini App WebView.
 function isInsideTelegram() {
   return !!(window.Telegram?.WebApp?.initData);
+}
+
+function TelegramSuccessView({ onClose }: { onClose: () => void }) {
+  const autoClose = !(import.meta.env.VITE_DISABLE_AUTO_CLOSE === 'true');
+  
+  React.useEffect(() => {
+    if (!autoClose) return;
+    const timer = setTimeout(onClose, TELEGRAM_SUCCESS_AUTO_CLOSE_MS);
+    return () => clearTimeout(timer);
+  }, [onClose, autoClose]);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-6 p-8 text-center bg-[#0f0f1a] text-white">
+      <div className="text-5xl">✅</div>
+      <h1 className="text-2xl font-semibold">Signed in!</h1>
+      <p className="text-white/40 max-w-xs">
+        You are now connected to Aegis. Return to Telegram to start using the agent.
+      </p>
+      <button
+        className="px-6 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-medium transition-colors"
+        onClick={onClose}
+      >
+        Return to Telegram
+      </button>
+    </div>
+  );
 }
 
 export default function App() {
@@ -385,6 +412,21 @@ export default function App() {
   }, [embeddedWallet?.address, client?.account?.address]);
 
   if (!ready) return <LoadingSpinner />;
+
+  // Signing deep links carry ?requestId=xxx — the user opened the app to approve a
+  // transaction, not to log in. Skip the success screen so ConnectedView can render
+  // the signing modal.
+  const isSigningDeepLink = new URLSearchParams(window.location.search).has('requestId');
+
+  // Inside Telegram mini app: once backend JWT is obtained, show success screen.
+  // Skipped when the app was opened via a signing deep link.
+  if (authenticated && backendJwt && isInsideTelegram() && !isSigningDeepLink) {
+    return (
+      <TelegramSuccessView
+        onClose={() => window.Telegram?.WebApp?.close?.()}
+      />
+    );
+  }
 
   if (authenticated) {
     const eoaAddress = (embeddedWallet ?? wallets[0])?.address ?? "";
