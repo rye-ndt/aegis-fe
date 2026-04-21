@@ -32,3 +32,29 @@
   - Auto-login only triggers inside real Telegram WebView (`window.Telegram?.WebApp`); falls back to Google OAuth in browser
   - `initDataRaw` is never logged in production builds (guarded via `import.meta.env.DEV`)
   - Full E2E verification inside real Telegram Mini App context required before production release (cannot be tested in browser)
+
+## 2026-04-17T10:28:00+07:00
+- **Task Summary**: Investigated the front-end infinite loading issue.
+- **Files Modified**: None (read-only research task).
+- **Commands Executed**: Run `npm run dev` and `browser_subagent` to check console logs.
+- **Tests Run & Results**: Verified that the infinite loading is caused by a CSP issue (`frame-ancestors`) blocking the Privy authentication iframe, which prevents the Privy SDK from reaching the `ready` state.
+- **Known Risks, Assumptions, or Limitations**: The root cause is that the `ngrok-free.app` URL restricts loading to older subdomains set in the Privy dashboard. Must update "Allowed Domains" on dashboard.privy.io.
+
+## 2026-04-17T10:44:00+07:00
+- **Task Summary**: Fixed the issue where Server-Sent Events (SSE) signing requests were not received by the frontend on initial load.
+- **Files Modified**: `be/src/adapters/implementations/input/http/httpServer.ts`
+- **Commands Executed**: None (direct file replacement).
+- **Tests Run & Results**: N/A (Manual visual review confirmed adherence to Node.js `ServerResponse` requirements for SSE).
+- **Known Risks, Assumptions, or Limitations**: Node.js `ServerResponse.write` chunks can be delayed or buffered if HTTP headers are not pushed first. Added `res.flushHeaders()` so `EventSource` on the frontend can properly transition to an OPEN state, resolving the issue where `getPendingForUser` re-played events went unreceived.
+
+## 2026-04-17T10:55:00+07:00
+- **Task Summary**: Transitioned signing request logic to an explicit, stateless routing model using URL query parameters (`?requestId=...`).
+- **Files Modified**: 
+  - `be/src/use-cases/interface/input/signingRequest.interface.ts`
+  - `be/src/use-cases/implementations/signingRequest.usecase.ts`
+  - `be/src/adapters/implementations/input/http/httpServer.ts`
+  - `be/src/adapters/implementations/input/telegram/handler.ts`
+  - `fe/privy-auth/src/hooks/useSigningRequests.ts`
+- **Commands Executed**: None (direct file edits).
+- **Tests Run & Results**: Successfully implemented `GET /sign-requests/:id` to fetch the payload directly on mount and circumvent SSE timing edges.
+- **Known Risks, Assumptions, or Limitations**: Added Set-based deduplication logic in `useSigningRequests.ts` to prevent race conditions where both the explicit HTTP fetch and the SSE stream attempt to queue the exact same modal on the frontend UI.

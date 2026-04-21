@@ -26,8 +26,8 @@ export function TelegramAutoLogin() {
     if (authenticated) return;
     // Only attempt once per mount (StrictMode fires effects twice in dev).
     if (attemptedRef.current) return;
-    // Guard: not inside a Telegram Mini App WebView.
-    if (!window.Telegram?.WebApp) return;
+    // Guard: not inside a real Telegram Mini App WebView (initData is empty in browsers).
+    if (!window.Telegram?.WebApp?.initData) return;
 
     attemptedRef.current = true;
 

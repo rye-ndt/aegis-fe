@@ -1,13 +1,9 @@
 import React from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
-import { useDelegatedKey, type DelegationState } from './hooks/useDelegatedKey';
-import { usePendingSigning } from './hooks/usePendingSigning';
 import { useSigningRequests } from './hooks/useSigningRequests';
-import { PasswordDialog } from './components/PasswordDialog';
-import { DelegationDebugPanel } from './components/DelegationDebugPanel';
-import { SigningApprovalModal } from './components/SigningApprovalModal';
 import { SigningRequestModal } from './components/SigningRequestModal';
+import { DebugLog } from './components/DebugLog';
 import type { PendingSigningRequest as BotSigningRequest } from './hooks/useSigningRequests';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -151,29 +147,43 @@ function usePrivySession() {
   const [privyToken, setPrivyToken] = React.useState<string | null>(null);
   const [backendJwt, setBackendJwt] = React.useState<string | null>(null);
 
-  // Fetch a fresh Privy access token once authentication is confirmed.
   React.useEffect(() => {
+    console.log('[AEGIS:auth] authenticated changed:', authenticated);
     if (!authenticated) return;
-    getAccessToken().then(setPrivyToken);
+    console.log('[AEGIS:auth] calling getAccessToken()');
+    getAccessToken().then(t => {
+      console.log('[AEGIS:auth] privyToken obtained:', t ? `${t.slice(0, 20)}…` : 'null');
+      setPrivyToken(t);
+    });
   }, [authenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Exchange Privy token for backend JWT via POST /auth/privy
   React.useEffect(() => {
     if (!privyToken) return;
     const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+    console.log('[AEGIS:auth] VITE_BACKEND_URL =', backendUrl || '(EMPTY — check .env!)');
     if (!backendUrl) return;
+    const telegramChatId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id?.toString();
+    console.log('[AEGIS:auth] telegramChatId from initDataUnsafe =', telegramChatId ?? '(not in Telegram)');
+    console.log('[AEGIS:auth] POST /auth/privy with privyToken + telegramChatId:', telegramChatId);
     fetch(`${backendUrl}/auth/privy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: privyToken }),
+      body: JSON.stringify({
+        privyToken,
+        ...(telegramChatId && { telegramChatId }),
+      }),
     })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((body: { jwt?: string; token?: string }) => {
-        const jwt = body.jwt ?? body.token ?? null;
+      .then((r) => {
+        console.log('[AEGIS:auth] /auth/privy response status:', r.status);
+        return r.ok ? r.json() : r.text().then(t => { console.warn('[AEGIS:auth] /auth/privy error body:', t); return Promise.reject(r.status); });
+      })
+      .then((body: { token: string; userId?: string }) => {
+        const jwt = body.token ?? null;
+        console.log('[AEGIS:auth] backendJwt obtained, userId in body:', body.userId, '| jwt:', jwt ? `${jwt.slice(0, 20)}…` : 'null');
         setBackendJwt(jwt);
       })
       .catch((err) => {
-        console.warn('[Auth] Could not exchange Privy token for backend JWT:', err);
+        console.warn('[AEGIS:auth] /auth/privy failed:', err);
       });
   }, [privyToken]);
 
@@ -187,18 +197,12 @@ function ConnectedView({
   smartAddress,
   privyToken,
   getAccessToken,
-  delegationState,
-  submitPassword,
-  pendingSigning,
   pendingBotRequest,
 }: {
   eoaAddress: string;
   smartAddress: string;
   privyToken: string | null;
   getAccessToken: () => Promise<string | null>;
-  delegationState: DelegationState;
-  submitPassword: (password: string) => void;
-  pendingSigning: ReturnType<typeof usePendingSigning>['pending'];
   pendingBotRequest: BotSigningRequest | null;
 }) {
   const { logout } = usePrivy();
@@ -253,28 +257,6 @@ function ConnectedView({
       <AddressRow label="Signer (EOA)" address={eoaAddress} />
       {privyToken && <TokenRow getToken={getAccessToken} preview={privyToken} />}
 
-      {delegationState.status === 'needs_password' && (
-        <PasswordDialog
-          mode={delegationState.mode}
-          onSubmit={submitPassword}
-          error={delegationState.error}
-        />
-      )}
-
-      {delegationState.status === 'processing' && (
-        <p className="text-xs text-white/40 animate-pulse">{delegationState.step}</p>
-      )}
-
-      {delegationState.status === 'error' && (
-        <div className="w-full max-w-sm bg-red-900/20 border border-red-500/30 rounded-xl px-4 py-3">
-          <p className="text-xs text-red-400">{delegationState.message}</p>
-        </div>
-      )}
-
-      {delegationState.status === 'done' && (
-        <DelegationDebugPanel record={delegationState.record} />
-      )}
-
       <button
         onClick={logout}
         className="text-xs text-white/30 hover:text-white/60 transition-colors duration-200 underline underline-offset-2 mt-4"
@@ -282,12 +264,14 @@ function ConnectedView({
         Disconnect
       </button>
 
-      {pendingSigning && (
-        <SigningApprovalModal
-          request={pendingSigning}
-          onClose={() => {/* pending auto-clears after approve/reject */}}
-        />
-      )}
+      <div className="w-full max-w-sm bg-white/5 border border-white/10 rounded-xl px-4 py-3 mt-4 overflow-hidden">
+        <p className="text-[10px] text-white/40 mb-1">Debug URL:</p>
+        <p className="text-[10px] text-white/80 font-mono break-all leading-tight">
+          {window.location.href}
+        </p>
+      </div>
+
+      <DebugLog />
 
       {pendingBotRequest && (
         <SigningRequestModal
@@ -355,26 +339,43 @@ function LoginView() {
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
+const TMA_AUTO_LOGIN_TIMEOUT_MS = 4000;
+
+// telegram-web-app.js is always loaded in index.html, so window.Telegram.WebApp
+// is defined even in a regular browser. Only trust it when initData is non-empty,
+// which only happens inside a real Telegram Mini App WebView.
+function isInsideTelegram() {
+  return !!(window.Telegram?.WebApp?.initData);
+}
+
 export default function App() {
   const { ready, authenticated } = usePrivy();
   const { wallets } = useWallets();
   const { client } = useSmartWallets();
   const { privyToken, getAccessToken, backendJwt } = usePrivySession();
+  const [tmaLoginTimedOut, setTmaLoginTimedOut] = React.useState(false);
+
+  // If Telegram auto-login doesn't complete within 4 seconds, fall through to LoginView.
+  React.useEffect(() => {
+    if (!isInsideTelegram()) return;
+    const t = setTimeout(() => setTmaLoginTimedOut(true), TMA_AUTO_LOGIN_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, []); // empty deps: timer fires once on mount; authenticated toggling during Privy session refresh cannot reset it
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  const { pending: pendingSigning, onPending } = usePendingSigning();
-  const { state: delegationState, submitPassword, serializedBlob } = useDelegatedKey({
-    smartAccountAddress: client?.account?.address ?? '',
-    signerAddress: embeddedWallet?.address ?? '',
-    signerWallet: embeddedWallet,
-    onPendingSigning: onPending,
-  });
 
   const { pending: pendingBotRequest } = useSigningRequests({
-    serializedBlob: delegationState.status === 'done' ? serializedBlob : null,
+    client: client || null,
     jwtToken: backendJwt,
-    zerodevRpc: (import.meta.env.VITE_ZERODEV_RPC as string) ?? '',
   });
+
+  React.useEffect(() => {
+    console.log('[AEGIS:app] ready:', ready, '| authenticated:', authenticated, '| backendJwt:', backendJwt ? `${backendJwt.slice(0, 20)}…` : 'null', '| client:', client ? 'non-null' : 'null');
+  }, [ready, authenticated, backendJwt, client]);
+
+  React.useEffect(() => {
+    console.log('[AEGIS:app] wallets:', wallets.map(w => `${w.walletClientType}:${w.address}`));
+  }, [wallets]);
 
   // Debug: log wallet addresses whenever they change (dev only).
   React.useEffect(() => {
@@ -394,9 +395,6 @@ export default function App() {
         smartAddress={smartAddress}
         privyToken={privyToken}
         getAccessToken={getAccessToken}
-        delegationState={delegationState}
-        submitPassword={submitPassword}
-        pendingSigning={pendingSigning}
         pendingBotRequest={pendingBotRequest}
       />
     );
@@ -404,8 +402,8 @@ export default function App() {
 
   // Suppress LoginView while TelegramAutoLogin is in flight inside a Telegram WebView.
   // Once authenticated flips to true, the branch above takes over; this spinner
-  // only shows during the brief auto-login window.
-  if (window.Telegram?.WebApp) {
+  // only shows during the brief auto-login window. Falls through after 4s if auto-login fails.
+  if (isInsideTelegram() && !tmaLoginTimedOut) {
     return <LoadingSpinner />;
   }
 
