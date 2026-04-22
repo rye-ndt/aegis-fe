@@ -60,3 +60,12 @@ export function cloudStorageSetItem(key: string, value: string): Promise<void> {
     });
   });
 }
+
+export function cloudStorageRemoveItem(key: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    getCloudStorage().removeItem(key, (error) => {
+      if (error) return reject(new Error(error));
+      resolve();
+    });
+  });
+}

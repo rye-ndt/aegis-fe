@@ -4,10 +4,8 @@ import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { useSigningRequests } from './hooks/useSigningRequests';
 import { SigningRequestModal } from './components/SigningRequestModal';
 import { DebugLog } from './components/DebugLog';
-import { useAegisGuard } from './hooks/useAegisGuard';
-import { AegisGuardToggle } from './components/AegisGuardToggle';
-import { AegisGuardModal } from './components/AegisGuardModal';
 import { useDelegatedKey } from './hooks/useDelegatedKey';
+import { ApprovalOnboarding } from './components/ApprovalOnboarding';
 import type { PendingSigningRequest as BotSigningRequest } from './hooks/useSigningRequests';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -149,11 +147,16 @@ function TokenRow({ getToken, preview }: { getToken: () => Promise<string | null
 function usePrivySession() {
   const { authenticated, getAccessToken } = usePrivy();
   const [privyToken, setPrivyToken] = React.useState<string | null>(null);
+  // backendJwt is set to the Privy token after /auth/privy completes (user created/linked in DB)
   const [backendJwt, setBackendJwt] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     console.log('[AEGIS:auth] authenticated changed:', authenticated);
-    if (!authenticated) return;
+    if (!authenticated) {
+      setPrivyToken(null);
+      setBackendJwt(null);
+      return;
+    }
     console.log('[AEGIS:auth] calling getAccessToken()');
     getAccessToken().then(t => {
       console.log('[AEGIS:auth] privyToken obtained:', t ? `${t.slice(0, 20)}…` : 'null');
@@ -168,7 +171,7 @@ function usePrivySession() {
     if (!backendUrl) return;
     const telegramChatId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id?.toString();
     console.log('[AEGIS:auth] telegramChatId from initDataUnsafe =', telegramChatId ?? '(not in Telegram)');
-    console.log('[AEGIS:auth] POST /auth/privy with privyToken + telegramChatId:', telegramChatId);
+    console.log('[AEGIS:auth] POST /auth/privy to register user + link telegramChatId:', telegramChatId);
     fetch(`${backendUrl}/auth/privy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -181,10 +184,10 @@ function usePrivySession() {
         console.log('[AEGIS:auth] /auth/privy response status:', r.status);
         return r.ok ? r.json() : r.text().then(t => { console.warn('[AEGIS:auth] /auth/privy error body:', t); return Promise.reject(r.status); });
       })
-      .then((body: { token: string; userId?: string }) => {
-        const jwt = body.token ?? null;
-        console.log('[AEGIS:auth] backendJwt obtained, userId in body:', body.userId, '| jwt:', jwt ? `${jwt.slice(0, 20)}…` : 'null');
-        setBackendJwt(jwt);
+      .then((body: { token?: string; userId?: string }) => {
+        // Use the Privy token directly for all API calls — backend now verifies it via Privy SDK
+        console.log('[AEGIS:auth] /auth/privy complete, userId:', body.userId, '| using Privy token for API auth');
+        setBackendJwt(privyToken);
       })
       .catch((err) => {
         console.warn('[AEGIS:auth] /auth/privy failed:', err);
@@ -203,6 +206,7 @@ function ConnectedView({
   getAccessToken,
   pendingBotRequest,
   backendJwt,
+  privyDid,
 }: {
   eoaAddress: string;
   smartAddress: string;
@@ -210,64 +214,84 @@ function ConnectedView({
   getAccessToken: () => Promise<string | null>;
   pendingBotRequest: BotSigningRequest | null;
   backendJwt: string | null;
+  privyDid: string;
 }) {
-  const { logout } = usePrivy();
   const { wallets } = useWallets();
-
-  // Bring in delegated key purely for AegisGuard to check if key exists
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
-  const { state: delegationState, keypairAddress, keypairRef, updateBlob } = useDelegatedKey({
+
+  const delegatedKeyHook = useDelegatedKey({
     smartAccountAddress: smartAddress,
     signerAddress: eoaAddress,
     signerWallet: embeddedWallet,
-    onPendingSigning: () => {} // ignoring requests just for key existence check
+    privyDid,
+    backendJwt,
   });
 
-  const {
-    enabled,
-    isModalOpen,
-    isLoading,
-    error,
-    openModal,
-    closeModal,
-    disable,
-    grant
-  } = useAegisGuard({ keypairRef, keypairAddress, scaAddress: smartAddress, updateBlob });
+  // ── Fetch active delegations to decide which view to show ─────────────────
+  const [delegations, setDelegations] = React.useState<unknown[] | null>(null);
+  const [delegationsLoading, setDelegationsLoading] = React.useState(true);
 
-  const isDelegateReady = delegationState.status === 'done';
+  React.useEffect(() => {
+    if (!backendJwt) return;
+    const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+    (async () => {
+      try {
+        const resp = await fetch(`${backendUrl}/delegation/grant`, {
+          headers: { Authorization: `Bearer ${backendJwt}` },
+        });
+        const data = await resp.json();
+        setDelegations(data.delegations ?? []);
+      } catch {
+        // Treat fetch failure as empty → show onboarding
+        setDelegations([]);
+      } finally {
+        setDelegationsLoading(false);
+      }
+    })();
+  }, [backendJwt]);
 
+  // ── Routing ───────────────────────────────────────────────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  const isReapproval = urlParams.get('reapproval') === '1';
+  const isSigningDeepLink = urlParams.has('requestId');
+
+  if (delegationsLoading) return <LoadingSpinner />;
+
+  // Priority 1: signing deep-link (edge-case fallback during transition)
+  if (isSigningDeepLink && pendingBotRequest) {
+    return (
+      <SigningRequestModal
+        request={pendingBotRequest}
+        onClose={() => { /* pending auto-clears after approve/reject */ }}
+      />
+    );
+  }
+
+  // Priority 2: no delegations yet, or explicit re-approval requested
+  if (isReapproval || (delegations !== null && delegations.length === 0)) {
+    return (
+      <ApprovalOnboarding
+        backendJwt={backendJwt ?? ''}
+        delegatedKey={{ state: delegatedKeyHook.state, start: delegatedKeyHook.start }}
+      />
+    );
+  }
+
+  // Priority 3: delegations exist and no special params → close TMA
+  // (Mini App was opened after onboarding is already complete)
+  window.Telegram?.WebApp?.close();
+
+  // Render minimal fallback in case close() doesn't fire (e.g. non-Telegram browser)
   return (
     <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-6">
       <div className="relative">
         <div className="absolute inset-0 rounded-full bg-violet-500/20 blur-2xl scale-150" />
         <div className="relative flex items-center justify-center w-20 h-20 rounded-full bg-violet-500/10 border border-violet-500/30">
-          <svg
-            width="32"
-            height="32"
-            viewBox="0 0 24 24"
-            fill="none"
-            aria-hidden="true"
-          >
-            <path
-              d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z"
-              fill="url(#shield-connected)"
-            />
-            <path
-              d="M9 12l2 2 4-4"
-              stroke="white"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z" fill="url(#shield-connected)" />
+            <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
             <defs>
-              <linearGradient
-                id="shield-connected"
-                x1="3"
-                y1="2"
-                x2="21"
-                y2="23"
-                gradientUnits="userSpaceOnUse"
-              >
+              <linearGradient id="shield-connected" x1="3" y1="2" x2="21" y2="23" gradientUnits="userSpaceOnUse">
                 <stop stopColor="#7c3aed" />
                 <stop offset="1" stopColor="#4f46e5" />
               </linearGradient>
@@ -276,61 +300,29 @@ function ConnectedView({
         </div>
       </div>
 
-      <p className="text-xs font-semibold tracking-widest text-violet-400 uppercase">
-        Connected
-      </p>
-
-      {smartAddress && (
-        <AddressRow label="Smart Wallet" address={smartAddress} />
-      )}
+      <p className="text-xs font-semibold tracking-widest text-violet-400 uppercase">Connected</p>
+      {smartAddress && <AddressRow label="Smart Wallet" address={smartAddress} />}
       <AddressRow label="Signer (EOA)" address={eoaAddress} />
       {privyToken && <TokenRow getToken={getAccessToken} preview={privyToken} />}
 
-      <button
-        onClick={logout}
-        className="text-xs text-white/30 hover:text-white/60 transition-colors duration-200 underline underline-offset-2 mt-4"
-      >
-        Disconnect
-      </button>
+      <p className="text-xs text-white/30 text-center max-w-xs">
+        Aegis Guard is active — return to Telegram to use the bot.
+      </p>
 
-      <div className="w-full max-w-sm bg-white/5 border border-white/10 rounded-xl px-4 py-3 mt-4 overflow-hidden">
-        <p className="text-[10px] text-white/40 mb-1">Debug URL:</p>
-        <p className="text-[10px] text-white/80 font-mono break-all leading-tight">
-          {window.location.href}
-        </p>
-      </div>
-
-      <AegisGuardToggle 
-        enabled={enabled}
-        isLoading={isLoading}
-        onEnable={openModal}
-        onDisable={disable}
-        disabledReason={!isDelegateReady ? "Set up your session key first." : undefined}
-      />
-      {error && <p className="text-red-400 text-xs text-center max-w-sm break-all">Aegis Guard config error: {error}</p>}
+      {import.meta.env.DEV && (
+        <button
+          onClick={delegatedKeyHook.removeKey}
+          className="text-xs text-red-500/50 hover:text-red-400 transition-colors duration-200 underline underline-offset-2"
+        >
+          [dev] Remove session key
+        </button>
+      )}
 
       <DebugLog />
-
-      {pendingBotRequest && (
-        <SigningRequestModal
-          request={pendingBotRequest}
-          onClose={() => {/* pending auto-clears after approve/reject */}}
-        />
-      )}
-
-      {isModalOpen && keypairAddress && smartAddress && backendJwt && (
-        <AegisGuardModal
-           keypairAddress={keypairAddress}
-           scaAddress={smartAddress}
-           jwtToken={backendJwt}
-           onConfirm={grant}
-           onClose={closeModal}
-           isSubmitting={isLoading}
-        />
-      )}
     </div>
   );
 }
+
 
 function LoginView() {
   const { login, ready } = usePrivy();
@@ -425,11 +417,21 @@ function TelegramSuccessView({ onClose }: { onClose: () => void }) {
 }
 
 export default function App() {
-  const { ready, authenticated } = usePrivy();
+  const { ready, authenticated, user } = usePrivy();
   const { wallets } = useWallets();
   const { client } = useSmartWallets();
   const { privyToken, getAccessToken, backendJwt } = usePrivySession();
   const [tmaLoginTimedOut, setTmaLoginTimedOut] = React.useState(false);
+
+  // Track whether authenticated was already true when ready first fired.
+  // If true, the user is resuming an existing session — don't show the success screen.
+  const authOnReadyRef = React.useRef<boolean | null>(null);
+  React.useEffect(() => {
+    if (!ready || authOnReadyRef.current !== null) return;
+    authOnReadyRef.current = authenticated;
+  }, [ready, authenticated]);
+  // Only show TelegramSuccessView for logins that happened in this page session
+  const justLoggedIn = authOnReadyRef.current === false && authenticated;
 
   // If Telegram auto-login doesn't complete within 4 seconds, fall through to LoginView.
   React.useEffect(() => {
@@ -469,7 +471,7 @@ export default function App() {
 
   // Inside Telegram mini app: once backend JWT is obtained, show success screen.
   // Skipped when the app was opened via a signing deep link.
-  if (authenticated && backendJwt && isInsideTelegram() && !isSigningDeepLink) {
+  if (authenticated && backendJwt && isInsideTelegram() && !isSigningDeepLink && justLoggedIn) {
     return (
       <TelegramSuccessView
         onClose={() => window.Telegram?.WebApp?.close?.()}
@@ -488,6 +490,7 @@ export default function App() {
         getAccessToken={getAccessToken}
         pendingBotRequest={pendingBotRequest}
         backendJwt={backendJwt}
+        privyDid={user?.id ?? ''}
       />
     );
   }

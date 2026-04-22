@@ -7,10 +7,8 @@ import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount }
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
 import { toECDSASigner } from '@zerodev/permissions/signers';
 import { toPermissionValidator, serializePermissionAccount, deserializePermissionAccount } from '@zerodev/permissions';
-import { toSudoPolicy, toCallPolicy, ParamCondition } from '@zerodev/permissions/policies';
-import { createZeroDevPaymasterClient } from '@zerodev/sdk';
-import { erc20Abi } from 'viem';
-import type { EIP1193Provider, Address, Hex } from 'viem';
+import { toSudoPolicy } from '@zerodev/permissions/policies';
+import type { EIP1193Provider, Hex } from 'viem';
 import type { KernelAccountClient } from '@zerodev/sdk';
 
 // ---------------------------------------------------------------------------
@@ -38,11 +36,6 @@ export type Keypair = {
   address: `0x${string}`;
 };
 
-export interface Erc20SpendingLimit {
-  tokenAddress: Address;
-  limitWei: bigint;
-  validUntil: number; // unix epoch seconds
-}
 
 // ---------------------------------------------------------------------------
 // Keypair generation
@@ -170,85 +163,6 @@ export async function installSessionKey(
   return await serializePermissionAccount(sessionKeyAccount, sessionPrivateKey);
 }
 
-export async function installSessionKeyWithErc20Limits(
-  keypairPrivateKey: Hex,
-  provider: EIP1193Provider,
-  signerAddress: Hex,
-  limits: Erc20SpendingLimit[],
-  paymasterUrl: string,
-): Promise<string> {
-  const walletClient = createWalletClient({
-    account: signerAddress,
-    chain: avalancheFuji,
-    transport: custom(provider as Parameters<typeof custom>[0]),
-  });
-
-  const privySigner = await toOwner({ owner: walletClient });
-
-  const bundlerUrl = import.meta.env.VITE_ZERODEV_RPC;
-  const publicClient = createPublicClient({
-    transport: http(bundlerUrl),
-    chain: avalancheFuji,
-  });
-
-  const entryPoint = getEntryPoint('0.7');
-  const kernelVersion = KERNEL_V3_1;
-
-  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
-    entryPoint,
-    signer: privySigner,
-    kernelVersion,
-  });
-
-  const sessionAccount = privateKeyToAccount(keypairPrivateKey);
-  const sessionKeySigner = await toECDSASigner({ signer: sessionAccount });
-
-  const policies = limits.map(limit => toCallPolicy({
-    permissions: [{
-      target: limit.tokenAddress,
-      valueLimit: BigInt(0),
-      abi: erc20Abi,
-      functionName: 'transfer',
-      args: [
-        null, // recipient: unconstrained
-        {
-          condition: ParamCondition.LESS_THAN_OR_EQUAL,
-          value: limit.limitWei,
-        },
-      ],
-      validUntil: limit.validUntil,
-      validAfter: 0,
-    }]
-  }));
-
-  const permissionPlugin = await toPermissionValidator(publicClient, {
-    entryPoint,
-    signer: sessionKeySigner,
-    policies,
-    kernelVersion,
-  });
-
-  const kernelAccount = await createKernelAccount(publicClient, {
-    entryPoint,
-    plugins: {
-      sudo: ecdsaValidator,
-      regular: permissionPlugin,
-    },
-    kernelVersion,
-  });
-
-  const kernelClient = createKernelAccountClient({
-    account: kernelAccount,
-    chain: avalancheFuji,
-    bundlerTransport: http(paymasterUrl),
-    paymaster: createZeroDevPaymasterClient({
-      chain: avalancheFuji,
-      transport: http(paymasterUrl),
-    }),
-  });
-
-  return await serializePermissionAccount(kernelAccount, keypairPrivateKey);
-}
 
 // ---------------------------------------------------------------------------
 // Signing account reconstruction (for future UserOp submission)

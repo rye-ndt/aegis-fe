@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ConnectedWallet } from '@privy-io/react-auth';
+import type { Hex } from 'viem';
 import {
   generateKeypair,
   encryptBlob,
@@ -8,9 +9,8 @@ import {
   type Permission,
   type DelegationRecord,
 } from '../utils/crypto';
-import { cloudStorageGetItem, cloudStorageSetItem } from '../utils/telegramStorage';
+import { cloudStorageGetItem, cloudStorageSetItem, cloudStorageRemoveItem } from '../utils/telegramStorage';
 import { toErrorMessage } from '../utils/toErrorMessage';
-import { createInterceptingProvider, type PendingSigningRequest } from '../utils/signingInterceptor';
 
 const STORAGE_KEY = 'delegated_key';
 
@@ -22,22 +22,17 @@ const DEFAULT_PERMISSIONS: Permission[] = [{
 
 export type DelegationState =
   | { status: 'idle' }
-  | { status: 'needs_password'; mode: 'create' | 'unlock'; error?: string }
   | { status: 'processing'; step: string }
   | { status: 'done'; record: DelegationRecord }
   | { status: 'error'; message: string };
 
 type Action =
-  | { type: 'NEEDS_CREATE'; error?: string }
-  | { type: 'NEEDS_UNLOCK'; error?: string }
   | { type: 'PROCESSING'; step: string }
   | { type: 'DONE'; record: DelegationRecord }
   | { type: 'ERROR'; message: string };
 
 function reducer(_: DelegationState, action: Action): DelegationState {
   switch (action.type) {
-    case 'NEEDS_CREATE': return { status: 'needs_password', mode: 'create', error: action.error };
-    case 'NEEDS_UNLOCK': return { status: 'needs_password', mode: 'unlock', error: action.error };
     case 'PROCESSING': return { status: 'processing', step: action.step };
     case 'DONE': return { status: 'done', record: action.record };
     case 'ERROR': return { status: 'error', message: action.message };
@@ -48,103 +43,68 @@ export function useDelegatedKey(options: {
   smartAccountAddress: string;
   signerAddress: string;
   signerWallet: ConnectedWallet | undefined;
-  onPendingSigning: (req: PendingSigningRequest) => void;
+  privyDid: string;                          // used for deterministic key derivation — no user prompt
+  backendJwt?: string | null;
 }): {
   state: DelegationState;
-  submitPassword: (password: string) => void;
+  start: () => void;
+  removeKey: () => Promise<void>;
   serializedBlob: string | null;
   keypairRef: React.MutableRefObject<{ privateKey: `0x${string}`; address: `0x${string}` } | null>;
   keypairAddress: string | null;
   scaAddress: string;
+  updateBlob: (newBlob: string) => Promise<void>;
 } {
-  const { smartAccountAddress, signerAddress, signerWallet, onPendingSigning } = options;
+  const { smartAccountAddress, signerAddress, signerWallet, privyDid, backendJwt } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
 
-  // Holds the encrypted CloudStorage value across create/unlock flows
-  const encryptedBlobRef = React.useRef<string | null>(null);
   // Holds the decrypted serialized blob after unlock/create; exposed for SSE signing
   const serializedBlobRef = React.useRef<string | null>(null);
   // Holds the keypair
   const keypairRef = React.useRef<{ privateKey: `0x${string}`; address: `0x${string}` } | null>(null);
-  // Holds password for re-encryption by AegisGuard
-  const passwordRef = React.useRef<string | null>(null);
 
-  // Check CloudStorage once the smart account address is known
-  React.useEffect(() => {
-    if (!smartAccountAddress) return;
+  const start = React.useCallback(() => {
+    if (!smartAccountAddress || !privyDid) return;
+
     (async () => {
       try {
+        dispatch({ type: 'PROCESSING', step: 'Checking stored session key…' });
+
         const existing = await cloudStorageGetItem(STORAGE_KEY);
+
         if (existing) {
-          encryptedBlobRef.current = existing;
-          dispatch({ type: 'NEEDS_UNLOCK' });
-        } else {
-          dispatch({ type: 'NEEDS_CREATE' });
-        }
-      } catch (err) {
-        dispatch({ type: 'ERROR', message: toErrorMessage(err) });
-      }
-    })();
-  }, [smartAccountAddress]);
-
-  // Stable ref so onPendingSigning changes don't recreate submitPassword
-  const onPendingSigningRef = React.useRef(onPendingSigning);
-  React.useEffect(() => { onPendingSigningRef.current = onPendingSigning; }, [onPendingSigning]);
-
-  const submitPassword = React.useCallback(
-    async (password: string) => {
-      dispatch({ type: 'PROCESSING', step: 'Preparing…' });
-      try {
-        const zerodevRpc = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
-        if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
-
-        let serializedBlob: string;
-        let record: DelegationRecord;
-
-        if (encryptedBlobRef.current) {
-          // ── UNLOCK: decrypt the stored blob and reconstruct public record ────────
+          // ── UNLOCK: decrypt the stored blob and restore keypair ─────────────
           dispatch({ type: 'PROCESSING', step: 'Decrypting session key…' });
-          passwordRef.current = password;
+          let decrypted: string;
           try {
-            serializedBlob = await decryptBlob(encryptedBlobRef.current, password);
+            decrypted = await decryptBlob(existing, privyDid);
           } catch {
-            dispatch({ type: 'NEEDS_UNLOCK', error: 'Wrong password, please try again' });
+            // Wrong key (user re-created account?) — fall through to CREATE path
+            console.warn('[Delegation] Decryption failed with privyDid — regenerating keypair');
+            // Intentional fall-through: decrypted is not set, CREATE block below will handle it
+            await createAndStore();
             return;
           }
-          serializedBlobRef.current = serializedBlob;
-          
+
           try {
-            const parsed = JSON.parse(serializedBlob);
-            // ZeroDev serializes private key or we might need to recreate it
-            // Actually, if ZeroDev doesn't store plain private key, we might have an issue.
-            // But we will assume it's in the serialized string or we can at least find the private key.
-            // Wait, we need the password to encrypt! 
-            // In UNLOCK we just got the password... we should store it temporarily if Aegis Guard needs to re-encrypt!
-            // Wait, Aegis Guard plan says "useDelegatedKey's keypairRef"
-            if (parsed.privateKey) {
-               keypairRef.current = { privateKey: parsed.privateKey as Hex, address: parsed.address || '0x' };
+            const wrapper = JSON.parse(decrypted);
+            if (wrapper.blob && wrapper.privateKey && wrapper.address) {
+              keypairRef.current = { privateKey: wrapper.privateKey as Hex, address: wrapper.address as Hex };
+              serializedBlobRef.current = wrapper.blob;
+            } else if (wrapper.privateKey) {
+              keypairRef.current = { privateKey: wrapper.privateKey as Hex, address: (wrapper.address ?? '0x') as Hex };
+              serializedBlobRef.current = decrypted;
+            } else {
+              serializedBlobRef.current = decrypted;
             }
-          } catch (e) {
-             // ignore parse error
+          } catch {
+            // Legacy raw blob without keypair metadata
+            serializedBlobRef.current = decrypted;
           }
 
-          // The record metadata was posted to the backend at creation time.
-          // TODO (future): GET ${VITE_BACKEND_URL}/permissions?address=<session_key_address>
-          // to repopulate the full public record for the debug panel.
-          // We derive the session key address from the blob via deserializePermissionAccount
-          // for the purpose of the debug panel — handled in a future step.
-          // For now, emit done with minimal info; the client is ready to sign.
-          dispatch({ type: 'PROCESSING', step: 'Session key ready.' });
-
-          // TODO (future): call createSessionKeyClient(serializedBlob, zerodevRpc) here
-          // and store the client in a ref so other components can call sendUserOperation.
-
-          // Reconstruct a minimal record for the debug panel from CloudStorage metadata.
-          // Full record can be fetched from backend via GET /permissions?public_key=address.
-          // For now, dispatch done with whatever we have.
-          record = {
-            publicKey: '',         // fetched from backend in future step
-            address: '0x',         // fetched from backend in future step
+          const record: DelegationRecord = {
+            publicKey: keypairRef.current?.address ?? '',
+            address: (keypairRef.current?.address ?? '0x') as `0x${string}`,
             smartAccountAddress: smartAccountAddress as `0x${string}`,
             signerAddress: signerAddress as `0x${string}`,
             permissions: DEFAULT_PERMISSIONS,
@@ -154,42 +114,48 @@ export function useDelegatedKey(options: {
           return;
         }
 
-        // ── CREATE: generate keypair → install on-chain → encrypt → store ─────────
+        // ── CREATE: generate keypair → install on-chain → encrypt → store ────
+        await createAndStore();
+      } catch (err) {
+        dispatch({ type: 'ERROR', message: toErrorMessage(err) });
+      }
+    })();
+
+    async function createAndStore() {
+      try {
         dispatch({ type: 'PROCESSING', step: 'Generating session keypair…' });
-        passwordRef.current = password;
         const keypair = generateKeypair();
         keypairRef.current = { privateKey: keypair.privateKey, address: keypair.address };
         console.log('[Delegation] Generated keypair:', {
           address: keypair.address,
           publicKey: keypair.publicKey,
-          privateKey: keypair.privateKey, // WARNING: remove before production
         });
 
         if (!signerWallet) throw new Error('Privy embedded wallet not found');
         const rawProvider = await signerWallet.getEthereumProvider();
-        const provider = createInterceptingProvider(
-          rawProvider as Parameters<typeof createInterceptingProvider>[0],
-          (req) => onPendingSigningRef.current(req),
-        );
 
-        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain… (approve in wallet)' });
-        serializedBlob = await installSessionKey(
-          provider as Parameters<typeof installSessionKey>[0],
+        const zerodevRpc = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
+        if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
+
+        dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain…' });
+        const blob = await installSessionKey(
+          rawProvider as Parameters<typeof installSessionKey>[0],
           signerAddress as `0x${string}`,
           keypair.privateKey,
           keypair.address,
           zerodevRpc,
         );
-        serializedBlobRef.current = serializedBlob;
+        serializedBlobRef.current = blob;
 
-        // Encrypt the serialized blob (which contains the private key) before persisting
-        dispatch({ type: 'PROCESSING', step: 'Encrypting and storing session key…' });
-        const encryptedBlob = await encryptBlob(serializedBlob, password);
-        await cloudStorageSetItem(STORAGE_KEY, encryptedBlob);
-        encryptedBlobRef.current = encryptedBlob;
+        dispatch({ type: 'PROCESSING', step: 'Storing session key…' });
+        const payload = JSON.stringify({ privateKey: keypair.privateKey, address: keypair.address, blob });
+        const encrypted = await encryptBlob(payload, privyDid);
+        await cloudStorageSetItem(STORAGE_KEY, encrypted);
 
-        // Build the public delegation record — no private key, no serialized blob
-        record = {
+        // POST public record to backend (no private key included)
+        dispatch({ type: 'PROCESSING', step: 'Persisting public metadata to backend…' });
+        const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+        const record: DelegationRecord = {
           publicKey: keypair.publicKey,
           address: keypair.address,
           smartAccountAddress: smartAccountAddress as `0x${string}`,
@@ -197,63 +163,63 @@ export function useDelegatedKey(options: {
           permissions: DEFAULT_PERMISSIONS,
           grantedAt: Math.floor(Date.now() / 1000),
         };
-
-        // POST public metadata to backend
-        dispatch({ type: 'PROCESSING', step: 'Persisting public metadata to backend…' });
-        const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
         try {
           const resp = await fetch(`${backendUrl}/persistent`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(record),   // serializedBlob is NOT included
+            headers: {
+              'Content-Type': 'application/json',
+              ...(backendJwt ? { Authorization: `Bearer ${backendJwt}` } : {}),
+            },
+            body: JSON.stringify(record),
           });
           if (!resp.ok) console.warn('[Delegation] Backend /persistent returned', resp.status);
         } catch (fetchErr) {
           console.warn('[Delegation] Could not reach backend /persistent:', toErrorMessage(fetchErr));
         }
 
-        // Debug logging
-        console.log('[Delegation] Keypair:', { address: record.address, publicKey: record.publicKey });
-        console.log('[Delegation] Permissions:', record.permissions);
-        console.log('[Delegation] Session key installed on-chain. Blob encrypted and stored in CloudStorage.');
-
+        console.log('[Delegation] Session key installed. Keypair:', { address: record.address, publicKey: record.publicKey });
         dispatch({ type: 'DONE', record });
       } catch (err) {
-        // User rejected the signing request — return to password prompt with a helpful message
         const isUserRejection =
           (err as { code?: number })?.code === 4001 ||
           (err instanceof Error && err.message.includes('User rejected'));
         if (isUserRejection) {
-          // Determine mode: if no encrypted blob existed we were in CREATE flow
-          const mode = encryptedBlobRef.current ? 'NEEDS_UNLOCK' : 'NEEDS_CREATE';
-          dispatch({
-            type: mode,
-            error: 'You rejected the signing request — try again.',
-          });
+          dispatch({ type: 'ERROR', message: 'You rejected the signing request — please try again.' });
           return;
         }
         dispatch({ type: 'ERROR', message: toErrorMessage(err) });
       }
-    },
-    [smartAccountAddress, signerAddress, signerWallet],
-  );
+    }
+  }, [smartAccountAddress, signerAddress, signerWallet, privyDid]);
 
-  const updateBlob = React.useCallback(async (newBlob: string) => {
-    if (!passwordRef.current) throw new Error('Password not available to encrypt blob');
-    const encrypted = await encryptBlob(newBlob, passwordRef.current);
-    await cloudStorageSetItem(STORAGE_KEY, encrypted);
-    encryptedBlobRef.current = encrypted;
-    serializedBlobRef.current = newBlob;
+  const removeKey = React.useCallback(async () => {
+    await cloudStorageRemoveItem(STORAGE_KEY);
+    serializedBlobRef.current = null;
+    keypairRef.current = null;
+    dispatch({ type: 'ERROR', message: 'Key removed — reload to create a new one.' });
   }, []);
 
-  return { 
-    state, 
-    submitPassword, 
+  const updateBlob = React.useCallback(async (newBlob: string) => {
+    if (!privyDid) throw new Error('privyDid not available to encrypt blob');
+    const storagePayload = JSON.stringify({
+      privateKey: keypairRef.current?.privateKey,
+      address: keypairRef.current?.address,
+      blob: newBlob,
+    });
+    const encrypted = await encryptBlob(storagePayload, privyDid);
+    await cloudStorageSetItem(STORAGE_KEY, encrypted);
+    serializedBlobRef.current = newBlob;
+  }, [privyDid]);
+
+  return {
+    state,
+    start,
+    removeKey,
     serializedBlob: serializedBlobRef.current,
     keypairRef,
     keypairAddress: keypairRef.current?.address || null,
     scaAddress: smartAccountAddress,
-    updateBlob
+    updateBlob,
   };
 }
 
