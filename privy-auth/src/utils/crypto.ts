@@ -3,7 +3,7 @@ import { createWalletClient, createPublicClient, custom, http } from 'viem';
 import { avalancheFuji } from 'viem/chains';
 import { toOwner } from 'permissionless/utils';
 import { signerToEcdsaValidator } from '@zerodev/ecdsa-validator';
-import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount } from '@zerodev/sdk';
+import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount, createZeroDevPaymasterClient } from '@zerodev/sdk';
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
 import { toECDSASigner } from '@zerodev/permissions/signers';
 import { toPermissionValidator, serializePermissionAccount, deserializePermissionAccount } from '@zerodev/permissions';
@@ -171,6 +171,7 @@ export async function installSessionKey(
 export async function createSessionKeyClient(
   serializedBlob: string,
   zerodevRpc: string,
+  paymasterUrl?: string,
 ): Promise<KernelAccountClient> {
   const publicClient = createPublicClient({
     transport: http(zerodevRpc),
@@ -187,10 +188,20 @@ export async function createSessionKeyClient(
     serializedBlob,
   );
 
+  const paymasterClient = paymasterUrl
+    ? createZeroDevPaymasterClient({ chain: avalancheFuji, transport: http(paymasterUrl) })
+    : null;
+
   return createKernelAccountClient({
     account,
     chain: avalancheFuji,
     bundlerTransport: http(zerodevRpc),
     entryPoint,
+    ...(paymasterClient && {
+      paymaster: {
+        getPaymasterData: paymasterClient.getPaymasterData,
+        getPaymasterStubData: paymasterClient.getPaymasterStubData,
+      },
+    }),
   });
 }

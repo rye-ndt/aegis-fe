@@ -6,7 +6,6 @@ import { SigningRequestModal } from './components/SigningRequestModal';
 import { DebugLog } from './components/DebugLog';
 import { useDelegatedKey } from './hooks/useDelegatedKey';
 import { ApprovalOnboarding } from './components/ApprovalOnboarding';
-import type { PendingSigningRequest as BotSigningRequest } from './hooks/useSigningRequests';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -204,7 +203,6 @@ function ConnectedView({
   smartAddress,
   privyToken,
   getAccessToken,
-  pendingBotRequest,
   backendJwt,
   privyDid,
 }: {
@@ -212,11 +210,11 @@ function ConnectedView({
   smartAddress: string;
   privyToken: string | null;
   getAccessToken: () => Promise<string | null>;
-  pendingBotRequest: BotSigningRequest | null;
   backendJwt: string | null;
   privyDid: string;
 }) {
   const { wallets } = useWallets();
+  const { client } = useSmartWallets();
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
 
   const delegatedKeyHook = useDelegatedKey({
@@ -254,6 +252,24 @@ function ConnectedView({
   const urlParams = new URLSearchParams(window.location.search);
   const isReapproval = urlParams.get('reapproval') === '1';
   const isSigningDeepLink = urlParams.has('requestId');
+  const isAutoSignDeepLink = isSigningDeepLink && urlParams.get('autoSign') === '1';
+
+  // Auto-load the delegated key when opening via an autoSign deep link so the
+  // session blob is ready before useSigningRequests tries to execute the tx.
+  // Depends on smartAddress because client?.account?.address is empty on first mount
+  // and only resolves once the smart wallet hydrates — without it, start() bails
+  // immediately on the !smartAccountAddress guard and never runs.
+  React.useEffect(() => {
+    if (isAutoSignDeepLink && delegatedKeyHook.state.status === 'idle' && smartAddress) {
+      delegatedKeyHook.start();
+    }
+  }, [smartAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const { pending: pendingBotRequest } = useSigningRequests({
+    client: client || null,
+    jwtToken: backendJwt,
+    serializedBlob: delegatedKeyHook.serializedBlob,
+  });
 
   if (delegationsLoading) return <LoadingSpinner />;
 
@@ -400,11 +416,6 @@ export default function App() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
 
-  const { pending: pendingBotRequest } = useSigningRequests({
-    client: client || null,
-    jwtToken: backendJwt,
-  });
-
   React.useEffect(() => {
     console.log('[AEGIS:app] ready:', ready, '| authenticated:', authenticated, '| backendJwt:', backendJwt ? `${backendJwt.slice(0, 20)}…` : 'null', '| client:', client ? 'non-null' : 'null');
   }, [ready, authenticated, backendJwt, client]);
@@ -431,7 +442,6 @@ export default function App() {
         smartAddress={smartAddress}
         privyToken={privyToken}
         getAccessToken={getAccessToken}
-        pendingBotRequest={pendingBotRequest}
         backendJwt={backendJwt}
         privyDid={user?.id ?? ''}
       />

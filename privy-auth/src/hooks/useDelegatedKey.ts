@@ -58,8 +58,11 @@ export function useDelegatedKey(options: {
   const { smartAccountAddress, signerAddress, signerWallet, privyDid, backendJwt } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
 
-  // Holds the decrypted serialized blob after unlock/create; exposed for SSE signing
+  // Holds the decrypted serialized blob after unlock/create; exposed for SSE signing.
+  // Both a ref (for sync access inside async callbacks) and state (to trigger re-renders
+  // so that useSigningRequests receives the updated value and can fire deferred autoSigns).
   const serializedBlobRef = React.useRef<string | null>(null);
+  const [serializedBlobState, setSerializedBlobState] = React.useState<string | null>(null);
   // Holds the keypair
   const keypairRef = React.useRef<{ privateKey: `0x${string}`; address: `0x${string}` } | null>(null);
 
@@ -91,15 +94,19 @@ export function useDelegatedKey(options: {
             if (wrapper.blob && wrapper.privateKey && wrapper.address) {
               keypairRef.current = { privateKey: wrapper.privateKey as Hex, address: wrapper.address as Hex };
               serializedBlobRef.current = wrapper.blob;
+              setSerializedBlobState(wrapper.blob);
             } else if (wrapper.privateKey) {
               keypairRef.current = { privateKey: wrapper.privateKey as Hex, address: (wrapper.address ?? '0x') as Hex };
               serializedBlobRef.current = decrypted;
+              setSerializedBlobState(decrypted);
             } else {
               serializedBlobRef.current = decrypted;
+              setSerializedBlobState(decrypted);
             }
           } catch {
             // Legacy raw blob without keypair metadata
             serializedBlobRef.current = decrypted;
+            setSerializedBlobState(decrypted);
           }
 
           const record: DelegationRecord = {
@@ -166,6 +173,7 @@ export function useDelegatedKey(options: {
           zerodevRpc,
         );
         serializedBlobRef.current = blob;
+        setSerializedBlobState(blob);
 
         dispatch({ type: 'PROCESSING', step: 'Storing session key…' });
         const payload = JSON.stringify({ privateKey: keypair.privateKey, address: keypair.address, blob });
@@ -215,6 +223,7 @@ export function useDelegatedKey(options: {
   const removeKey = React.useCallback(async () => {
     await cloudStorageRemoveItem(STORAGE_KEY);
     serializedBlobRef.current = null;
+    setSerializedBlobState(null);
     keypairRef.current = null;
     dispatch({ type: 'ERROR', message: 'Key removed — reload to create a new one.' });
   }, []);
@@ -229,13 +238,14 @@ export function useDelegatedKey(options: {
     const encrypted = await encryptBlob(storagePayload, privyDid);
     await cloudStorageSetItem(STORAGE_KEY, encrypted);
     serializedBlobRef.current = newBlob;
+    setSerializedBlobState(newBlob);
   }, [privyDid]);
 
   return {
     state,
     start,
     removeKey,
-    serializedBlob: serializedBlobRef.current,
+    serializedBlob: serializedBlobState,
     keypairRef,
     keypairAddress: keypairRef.current?.address || null,
     scaAddress: smartAccountAddress,

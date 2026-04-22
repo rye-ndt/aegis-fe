@@ -1,5 +1,9 @@
 import React from 'react';
 import type { SmartWalletClientType } from '@privy-io/react-auth/smart-wallets';
+import { createSessionKeyClient } from '../utils/crypto';
+
+const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
+const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
 
 export type SignRequestEvent = {
   type: 'sign_request';
@@ -9,6 +13,7 @@ export type SignRequestEvent = {
   data: string;       // calldata hex
   description: string;
   expiresAt: number;  // unix timestamp
+  autoSign?: boolean;
 };
 
 export type PendingSigningRequest = {
@@ -23,10 +28,11 @@ const warn = (...args: unknown[]) => console.warn('[AEGIS:signing]', ...args);
 export function useSigningRequests(options: {
   client: SmartWalletClientType | null;
   jwtToken: string | null;
+  serializedBlob?: string | null;
 }): {
   pending: PendingSigningRequest | null;
 } {
-  const { client, jwtToken } = options;
+  const { client, jwtToken, serializedBlob } = options;
   const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
 
   const [pending, setPending] = React.useState<PendingSigningRequest | null>(null);
@@ -37,6 +43,10 @@ export function useSigningRequests(options: {
 
   const clientRef = React.useRef<SmartWalletClientType | null>(client);
   const jwtTokenRef = React.useRef<string | null>(jwtToken);
+  const serializedBlobRef = React.useRef<string | null>(serializedBlob ?? null);
+  // Holds a deferred autoSign handler while we wait for serializedBlob to load
+  const pendingAutoSignRef = React.useRef<(() => Promise<void>) | null>(null);
+
   React.useEffect(() => {
     log('client ref updated:', client ? 'non-null' : 'null');
     clientRef.current = client;
@@ -45,6 +55,16 @@ export function useSigningRequests(options: {
     log('jwtToken ref updated:', jwtToken ? `${jwtToken.slice(0, 20)}…` : 'null');
     jwtTokenRef.current = jwtToken;
   }, [jwtToken]);
+  React.useEffect(() => {
+    serializedBlobRef.current = serializedBlob ?? null;
+    log('serializedBlob ref updated:', serializedBlob ? 'non-null' : 'null');
+    // If an autoSign was deferred while the blob was loading, execute it now
+    if (serializedBlob && pendingAutoSignRef.current) {
+      const fn = pendingAutoSignRef.current;
+      pendingAutoSignRef.current = null;
+      fn();
+    }
+  }, [serializedBlob]);
 
   const dequeueRef = React.useRef<() => void>(null!);
   dequeueRef.current = () => {
@@ -63,47 +83,125 @@ export function useSigningRequests(options: {
       return;
     }
 
-    log('dequeue: showing modal for', next.requestId, next);
+    log('dequeue:', next.autoSign ? '[autoSign]' : '[manual]', next.requestId);
     isPendingRef.current = true;
 
-    const approve = async (): Promise<void> => {
-      const activeClient = clientRef.current;
-      const jwt = jwtTokenRef.current;
-      log('approve: client=', activeClient ? 'non-null' : 'null', 'jwt=', jwt ? 'present' : 'null');
-      if (!activeClient || !jwt) throw new Error('Client and Session not ready');
+    // ── autoSign path — execute silently via delegated session key ─────────────
+    if (next.autoSign) {
+      const doAutoSign = async (): Promise<void> => {
+        const blob = serializedBlobRef.current;
+        const jwt = jwtTokenRef.current;
+        if (!blob || !ZERODEV_RPC) {
+          warn('autoSign: serializedBlob or ZERODEV_RPC unavailable — falling back to manual approval');
+          showManual(next);
+          return;
+        }
+        try {
+          log('autoSign: building session key client for', next.requestId);
+          const sessionClient = await createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL || undefined);
+          const hash = await sessionClient.sendTransaction({
+            to: next.to as `0x${string}`,
+            value: BigInt(next.value),
+            data: next.data as `0x${string}`,
+            account: sessionClient.account!,
+          });
+          log('autoSign: tx sent', hash, '— notifying backend');
+          if (jwt) {
+            await fetch(`${backendUrl}/sign-response`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+              body: JSON.stringify({ requestId: next.requestId, txHash: hash }),
+            });
+          }
+        } catch (err) {
+          warn('autoSign: transaction failed —', err instanceof Error ? err.message : String(err), err);
+          const activeJwt = jwtTokenRef.current;
+          if (activeJwt) {
+            fetch(`${backendUrl}/sign-response`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeJwt}` },
+              body: JSON.stringify({ requestId: next.requestId, rejected: true }),
+            }).catch(() => {});
+          }
+        } finally {
+          isPendingRef.current = false;
+          setPending(null);
+          window.Telegram?.WebApp?.close();
+        }
+      };
 
-      const hash = await activeClient.sendTransaction({
-        to: next.to as `0x${string}`,
-        value: BigInt(next.value),
-        data: next.data as `0x${string}`,
-        account: activeClient.account!,
-        chain: null,
-      });
-      log('approve: tx sent, hash=', hash);
+      if (serializedBlobRef.current) {
+        doAutoSign();
+      } else {
+        // Blob is still loading from CloudStorage — defer until it's ready.
+        // Safety timeout: if the blob never arrives (CloudStorage error), close
+        // the mini app after 10 seconds rather than leaving it open indefinitely.
+        log('autoSign: serializedBlob not yet loaded, deferring', next.requestId);
+        let timerFired = false;
+        const safetyTimer = setTimeout(() => {
+          if (pendingAutoSignRef.current !== null) {
+            timerFired = true;
+            warn('autoSign: blob never arrived within 10 s — aborting and closing mini app');
+            pendingAutoSignRef.current = null;
+            isPendingRef.current = false;
+            setPending(null);
+            window.Telegram?.WebApp?.close();
+          }
+        }, 10_000);
+        pendingAutoSignRef.current = async () => {
+          if (timerFired) return;
+          clearTimeout(safetyTimer);
+          await doAutoSign();
+        };
+      }
+      return;
+    }
 
-      await fetch(`${backendUrl}/sign-response`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-        body: JSON.stringify({ requestId: next.requestId, txHash: hash }),
-      });
+    // ── Manual approval path ───────────────────────────────────────────────────
+    showManual(next);
 
-      dequeueRef.current();
-    };
+    function showManual(event: SignRequestEvent) {
+      log('dequeue: showing modal for', event.requestId);
 
-    const reject = (): void => {
-      log('reject: requestId=', next.requestId);
-      const jwt = jwtTokenRef.current;
-      if (jwt) {
-        fetch(`${backendUrl}/sign-response`, {
+      const approve = async (): Promise<void> => {
+        const activeClient = clientRef.current;
+        const jwt = jwtTokenRef.current;
+        log('approve: client=', activeClient ? 'non-null' : 'null', 'jwt=', jwt ? 'present' : 'null');
+        if (!activeClient || !jwt) throw new Error('Client and Session not ready');
+
+        const hash = await activeClient.sendTransaction({
+          to: event.to as `0x${string}`,
+          value: BigInt(event.value),
+          data: event.data as `0x${string}`,
+          account: activeClient.account!,
+          chain: null,
+        });
+        log('approve: tx sent, hash=', hash);
+
+        await fetch(`${backendUrl}/sign-response`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-          body: JSON.stringify({ requestId: next.requestId, rejected: true }),
-        }).catch(() => {});
-      }
-      dequeueRef.current();
-    };
+          body: JSON.stringify({ requestId: event.requestId, txHash: hash }),
+        });
 
-    setPending({ event: next, approve, reject });
+        dequeueRef.current();
+      };
+
+      const reject = (): void => {
+        log('reject: requestId=', event.requestId);
+        const jwt = jwtTokenRef.current;
+        if (jwt) {
+          fetch(`${backendUrl}/sign-response`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+            body: JSON.stringify({ requestId: event.requestId, rejected: true }),
+          }).catch(() => {});
+        }
+        dequeueRef.current();
+      };
+
+      setPending({ event, approve, reject });
+    }
   };
 
   React.useEffect(() => {
@@ -121,7 +219,8 @@ export function useSigningRequests(options: {
     // ── Explicit deep-link fetch ──────────────────────────────────────────────
     const queryParams = new URLSearchParams(window.location.search);
     const explicitId = queryParams.get('requestId');
-    log('effect: URL requestId param =', explicitId ?? '(none)');
+    const autoSignParam = queryParams.get('autoSign') === '1';
+    log('effect: URL requestId param =', explicitId ?? '(none)', '| autoSign =', autoSignParam);
 
     if (explicitId && !seenIdsRef.current.has(explicitId)) {
       const fetchUrl = `${backendUrl}/sign-requests/${explicitId}`;
@@ -148,6 +247,7 @@ export function useSigningRequests(options: {
             data: data.data,
             description: data.description,
             expiresAt: data.expiresAt,
+            autoSign: data.autoSign ?? autoSignParam,
           };
           log('explicit fetch: queuing event', event);
           queueRef.current.unshift(event);
