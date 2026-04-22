@@ -1,5 +1,6 @@
 import React from 'react';
 import type { DelegationState } from '../hooks/useDelegatedKey';
+import { cloudStorageRemoveItem } from '../utils/telegramStorage';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -302,6 +303,18 @@ export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboard
         <p className="text-[11px] text-white/20 text-center max-w-xs leading-relaxed px-2">
           These limits are enforced by the Aegis server. You can revoke access at any time.
         </p>
+      )}
+
+      {import.meta.env.DEV && (
+        <button
+          onClick={async () => {
+            await cloudStorageRemoveItem('delegated_key').catch(() => {});
+            window.location.reload();
+          }}
+          className="text-xs text-red-500/50 hover:text-red-400 transition-colors duration-200 underline underline-offset-2 mt-2"
+        >
+          [dev] Wipe CloudStorage + reload
+        </button>
       )}
     </div>
   );

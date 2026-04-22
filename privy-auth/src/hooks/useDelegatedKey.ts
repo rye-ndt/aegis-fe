@@ -108,8 +108,28 @@ export function useDelegatedKey(options: {
             smartAccountAddress: smartAccountAddress as `0x${string}`,
             signerAddress: signerAddress as `0x${string}`,
             permissions: DEFAULT_PERMISSIONS,
-            grantedAt: 0,
+            grantedAt: Math.floor(Date.now() / 1000),
           };
+
+          // Re-sync user_profiles on the backend every unlock so that a DB
+          // truncation / new userId doesn't leave smartAccountAddress missing.
+          const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
+          if (backendUrl && backendJwt) {
+            try {
+              const resp = await fetch(`${backendUrl}/persistent`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${backendJwt}`,
+                },
+                body: JSON.stringify(record),
+              });
+              if (!resp.ok) console.warn('[Delegation] Backend /persistent returned', resp.status, '(unlock)');
+            } catch (fetchErr) {
+              console.warn('[Delegation] Could not reach backend /persistent (unlock):', toErrorMessage(fetchErr));
+            }
+          }
+
           dispatch({ type: 'DONE', record });
           return;
         }
@@ -190,7 +210,7 @@ export function useDelegatedKey(options: {
         dispatch({ type: 'ERROR', message: toErrorMessage(err) });
       }
     }
-  }, [smartAccountAddress, signerAddress, signerWallet, privyDid]);
+  }, [smartAccountAddress, signerAddress, signerWallet, privyDid, backendJwt]);
 
   const removeKey = React.useCallback(async () => {
     await cloudStorageRemoveItem(STORAGE_KEY);
