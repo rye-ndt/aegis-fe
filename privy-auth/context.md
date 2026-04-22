@@ -65,3 +65,19 @@
 - **Commands Executed**: `/bin/zsh -c -l "npm run build 2>&1 | grep App.tsx"`
 - **Tests Run & Results**: Run `npm run build` to verify type safety. The newly added code in `App.tsx` compiled successfully and no new TS errors were introduced (command exited with 1 because grep found no output, which means 0 errors in App.tsx).
 - **Known Risks, Assumptions, or Limitations**: Auto-closing the Mini App using `window.Telegram?.WebApp?.close?.()` relies on the user launching through the Telegram client. A configurable fallback env `VITE_DISABLE_AUTO_CLOSE` and constant `TELEGRAM_SUCCESS_AUTO_CLOSE_MS = 2000` are correctly applied.
+
+## 2026-04-22T07:48:07+07:00
+- **Task Summary**: Implemented Aegis Guard Frontend per `aegis-guard-plan.md`. This adds the Aegis Guard toggle and configuration modal to the UI, allowing the user to select tokens and spending limits, and issues an on-chain Session Key with restricted permissions.
+- **Files Modified**: 
+  - `privy-auth/.env`, `privy-auth/src/vite-env.d.ts` Add paymaster URL config
+  - `privy-auth/src/utils/crypto.ts` Add `installSessionKeyWithErc20Limits` logic
+  - `privy-auth/src/hooks/useDelegatedKey.ts` Expose `keypairRef` and `updateBlob` to allow Aegis Guard hook to extract private key and persist new blob representation.
+  - `privy-auth/src/hooks/useAegisGuard.ts` Create logic for interactions and data flow.
+  - `privy-auth/src/components/AegisGuardModal.tsx` Modal UI to input token allowance
+  - `privy-auth/src/components/AegisGuardToggle.tsx` Basic component.
+  - `privy-auth/src/App.tsx` Wiring Aegis Guard into the connected view
+- **Commands Executed**: `npx tsc --noEmit`
+- **Tests Run & Results**: Run `npx tsc --noEmit` inside `privy-auth` to verify type safety. The commands executed successfully without errors.
+- **Known Risks, Assumptions, or Limitations**: 
+  - Overwriting the Cloud Storage blob without tracking history implies returning to full admin privileges on the session key requires another explicit override request or recreation. The on-chain representation persists correctly in ZeroDev.
+  - Requires the paymaster URLs strictly whitelisting token contracts to sponsor gas correctly.

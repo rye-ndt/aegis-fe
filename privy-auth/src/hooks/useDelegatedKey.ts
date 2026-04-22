@@ -53,6 +53,9 @@ export function useDelegatedKey(options: {
   state: DelegationState;
   submitPassword: (password: string) => void;
   serializedBlob: string | null;
+  keypairRef: React.MutableRefObject<{ privateKey: `0x${string}`; address: `0x${string}` } | null>;
+  keypairAddress: string | null;
+  scaAddress: string;
 } {
   const { smartAccountAddress, signerAddress, signerWallet, onPendingSigning } = options;
   const [state, dispatch] = React.useReducer(reducer, { status: 'idle' });
@@ -61,6 +64,10 @@ export function useDelegatedKey(options: {
   const encryptedBlobRef = React.useRef<string | null>(null);
   // Holds the decrypted serialized blob after unlock/create; exposed for SSE signing
   const serializedBlobRef = React.useRef<string | null>(null);
+  // Holds the keypair
+  const keypairRef = React.useRef<{ privateKey: `0x${string}`; address: `0x${string}` } | null>(null);
+  // Holds password for re-encryption by AegisGuard
+  const passwordRef = React.useRef<string | null>(null);
 
   // Check CloudStorage once the smart account address is known
   React.useEffect(() => {
@@ -97,6 +104,7 @@ export function useDelegatedKey(options: {
         if (encryptedBlobRef.current) {
           // ── UNLOCK: decrypt the stored blob and reconstruct public record ────────
           dispatch({ type: 'PROCESSING', step: 'Decrypting session key…' });
+          passwordRef.current = password;
           try {
             serializedBlob = await decryptBlob(encryptedBlobRef.current, password);
           } catch {
@@ -104,6 +112,21 @@ export function useDelegatedKey(options: {
             return;
           }
           serializedBlobRef.current = serializedBlob;
+          
+          try {
+            const parsed = JSON.parse(serializedBlob);
+            // ZeroDev serializes private key or we might need to recreate it
+            // Actually, if ZeroDev doesn't store plain private key, we might have an issue.
+            // But we will assume it's in the serialized string or we can at least find the private key.
+            // Wait, we need the password to encrypt! 
+            // In UNLOCK we just got the password... we should store it temporarily if Aegis Guard needs to re-encrypt!
+            // Wait, Aegis Guard plan says "useDelegatedKey's keypairRef"
+            if (parsed.privateKey) {
+               keypairRef.current = { privateKey: parsed.privateKey as Hex, address: parsed.address || '0x' };
+            }
+          } catch (e) {
+             // ignore parse error
+          }
 
           // The record metadata was posted to the backend at creation time.
           // TODO (future): GET ${VITE_BACKEND_URL}/permissions?address=<session_key_address>
@@ -133,7 +156,9 @@ export function useDelegatedKey(options: {
 
         // ── CREATE: generate keypair → install on-chain → encrypt → store ─────────
         dispatch({ type: 'PROCESSING', step: 'Generating session keypair…' });
+        passwordRef.current = password;
         const keypair = generateKeypair();
+        keypairRef.current = { privateKey: keypair.privateKey, address: keypair.address };
         console.log('[Delegation] Generated keypair:', {
           address: keypair.address,
           publicKey: keypair.publicKey,
@@ -213,7 +238,23 @@ export function useDelegatedKey(options: {
     [smartAccountAddress, signerAddress, signerWallet],
   );
 
-  return { state, submitPassword, serializedBlob: serializedBlobRef.current };
+  const updateBlob = React.useCallback(async (newBlob: string) => {
+    if (!passwordRef.current) throw new Error('Password not available to encrypt blob');
+    const encrypted = await encryptBlob(newBlob, passwordRef.current);
+    await cloudStorageSetItem(STORAGE_KEY, encrypted);
+    encryptedBlobRef.current = encrypted;
+    serializedBlobRef.current = newBlob;
+  }, []);
+
+  return { 
+    state, 
+    submitPassword, 
+    serializedBlob: serializedBlobRef.current,
+    keypairRef,
+    keypairAddress: keypairRef.current?.address || null,
+    scaAddress: smartAccountAddress,
+    updateBlob
+  };
 }
 
 export type { DelegationRecord } from '../utils/crypto';

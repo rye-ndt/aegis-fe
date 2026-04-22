@@ -4,6 +4,10 @@ import { useSmartWallets } from "@privy-io/react-auth/smart-wallets";
 import { useSigningRequests } from './hooks/useSigningRequests';
 import { SigningRequestModal } from './components/SigningRequestModal';
 import { DebugLog } from './components/DebugLog';
+import { useAegisGuard } from './hooks/useAegisGuard';
+import { AegisGuardToggle } from './components/AegisGuardToggle';
+import { AegisGuardModal } from './components/AegisGuardModal';
+import { useDelegatedKey } from './hooks/useDelegatedKey';
 import type { PendingSigningRequest as BotSigningRequest } from './hooks/useSigningRequests';
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -198,14 +202,39 @@ function ConnectedView({
   privyToken,
   getAccessToken,
   pendingBotRequest,
+  backendJwt,
 }: {
   eoaAddress: string;
   smartAddress: string;
   privyToken: string | null;
   getAccessToken: () => Promise<string | null>;
   pendingBotRequest: BotSigningRequest | null;
+  backendJwt: string | null;
 }) {
   const { logout } = usePrivy();
+  const { wallets } = useWallets();
+
+  // Bring in delegated key purely for AegisGuard to check if key exists
+  const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
+  const { state: delegationState, keypairAddress, keypairRef, updateBlob } = useDelegatedKey({
+    smartAccountAddress: smartAddress,
+    signerAddress: eoaAddress,
+    signerWallet: embeddedWallet,
+    onPendingSigning: () => {} // ignoring requests just for key existence check
+  });
+
+  const {
+    enabled,
+    isModalOpen,
+    isLoading,
+    error,
+    openModal,
+    closeModal,
+    disable,
+    grant
+  } = useAegisGuard({ keypairRef, keypairAddress, scaAddress: smartAddress, updateBlob });
+
+  const isDelegateReady = delegationState.status === 'done';
 
   return (
     <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-6">
@@ -271,12 +300,32 @@ function ConnectedView({
         </p>
       </div>
 
+      <AegisGuardToggle 
+        enabled={enabled}
+        isLoading={isLoading}
+        onEnable={openModal}
+        onDisable={disable}
+        disabledReason={!isDelegateReady ? "Set up your session key first." : undefined}
+      />
+      {error && <p className="text-red-400 text-xs text-center max-w-sm break-all">Aegis Guard config error: {error}</p>}
+
       <DebugLog />
 
       {pendingBotRequest && (
         <SigningRequestModal
           request={pendingBotRequest}
           onClose={() => {/* pending auto-clears after approve/reject */}}
+        />
+      )}
+
+      {isModalOpen && keypairAddress && smartAddress && backendJwt && (
+        <AegisGuardModal
+           keypairAddress={keypairAddress}
+           scaAddress={smartAddress}
+           jwtToken={backendJwt}
+           onConfirm={grant}
+           onClose={closeModal}
+           isSubmitting={isLoading}
         />
       )}
     </div>
@@ -438,6 +487,7 @@ export default function App() {
         privyToken={privyToken}
         getAccessToken={getAccessToken}
         pendingBotRequest={pendingBotRequest}
+        backendJwt={backendJwt}
       />
     );
   }
