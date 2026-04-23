@@ -1,6 +1,6 @@
 import React from 'react';
 
-interface SignRequestEvent {
+export interface SignRequestEvent {
   type: 'sign_request';
   requestId: string;
   to: string;
@@ -11,15 +11,8 @@ interface SignRequestEvent {
   autoSign?: boolean;
 }
 
-interface PendingSigningRequest {
-  event: SignRequestEvent;
-  approve: () => Promise<void>;
-  reject: () => void;
-}
-
 function formatValue(wei: string): string {
   try {
-    // Display as ETH/AVAX (18 decimals), trimmed to 6 significant digits
     const value = BigInt(wei);
     if (value === 0n) return '0';
     const eth = Number(value) / 1e18;
@@ -29,54 +22,41 @@ function formatValue(wei: string): string {
   }
 }
 
+function truncateHex(hex: string, chars = 20): string {
+  if (hex.length <= chars * 2 + 2) return hex;
+  return `${hex.slice(0, chars + 2)}…${hex.slice(-chars)}`;
+}
+
 export function SigningRequestModal({
-  request,
-  onClose,
+  event,
+  approve,
+  reject,
 }: {
-  request: PendingSigningRequest;
-  onClose: () => void;
+  event: SignRequestEvent;
+  approve: () => Promise<void>;
+  reject: () => void;
 }) {
   const [showRaw, setShowRaw] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
-  const [txHash, setTxHash] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
-  const { event } = request;
-
-  // Escape key → reject (unless already submitted)
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !loading && !txHash) {
-        request.reject();
-        onClose();
-      }
+      if (e.key === 'Escape' && !loading) reject();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [request, onClose, loading, txHash]);
+  }, [reject, loading]);
 
   const handleApprove = async () => {
     setLoading(true);
     setError(null);
     try {
-      await request.approve();
-      setTxHash('submitted');
-      onClose();
+      await approve();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Transaction failed');
       setLoading(false);
     }
-  };
-
-  const handleReject = () => {
-    if (loading) return;
-    request.reject();
-    onClose();
-  };
-
-  const truncateHex = (hex: string, chars = 20) => {
-    if (hex.length <= chars * 2 + 2) return hex;
-    return `${hex.slice(0, chars + 2)}…${hex.slice(-chars)}`;
   };
 
   return (
@@ -84,11 +64,10 @@ export function SigningRequestModal({
       className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)' }}
       onClick={(e) => {
-        if (e.target === e.currentTarget && !loading) handleReject();
+        if (e.target === e.currentTarget && !loading) reject();
       }}
     >
       <div className="w-full max-w-sm bg-[#16162a] border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
-        {/* Header */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-white/10">
           <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -105,27 +84,13 @@ export function SigningRequestModal({
           </div>
         </div>
 
-        {/* Body */}
         <div className="px-5 py-4 max-h-72 overflow-y-auto">
           {!showRaw ? (
             <div className="space-y-2.5">
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-white/40 flex-shrink-0">To</span>
-                <span className="text-white/80 font-mono text-right break-all">{event.to}</span>
-              </div>
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-white/40 flex-shrink-0">Value</span>
-                <span className="text-white/80 font-mono text-right">
-                  {formatValue(event.value)} AVAX
-                </span>
-              </div>
+              <Row label="To" value={event.to} mono />
+              <Row label="Value" value={`${formatValue(event.value)} AVAX`} mono />
               {event.data && event.data !== '0x' && (
-                <div className="flex justify-between gap-4 text-xs">
-                  <span className="text-white/40 flex-shrink-0">Calldata</span>
-                  <span className="text-white/80 font-mono text-right break-all">
-                    {truncateHex(event.data)}
-                  </span>
-                </div>
+                <Row label="Calldata" value={truncateHex(event.data)} mono />
               )}
             </div>
           ) : (
@@ -141,7 +106,6 @@ export function SigningRequestModal({
           )}
         </div>
 
-        {/* Toggle */}
         <div className="px-5 pb-2">
           <button
             onClick={() => setShowRaw((v) => !v)}
@@ -151,10 +115,9 @@ export function SigningRequestModal({
           </button>
         </div>
 
-        {/* Footer */}
         <div className="flex gap-3 px-5 py-4 border-t border-white/10">
           <button
-            onClick={handleReject}
+            onClick={reject}
             disabled={loading}
             className="flex-1 py-2.5 rounded-xl text-sm font-medium text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -176,6 +139,15 @@ export function SigningRequestModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex justify-between gap-4 text-xs">
+      <span className="text-white/40 flex-shrink-0">{label}</span>
+      <span className={`text-white/80 text-right break-all ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   );
 }

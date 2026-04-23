@@ -30,12 +30,11 @@ export type DelegationRecord = {
   grantedAt: number;
 };
 
-export type Keypair = {
+type Keypair = {
   privateKey: `0x${string}`;
   publicKey: string;
   address: `0x${string}`;
 };
-
 
 // ---------------------------------------------------------------------------
 // Keypair generation

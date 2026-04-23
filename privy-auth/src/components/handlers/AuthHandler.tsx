@@ -2,6 +2,20 @@ import React from 'react';
 import type { AuthRequest } from '../../types/miniAppRequest.types';
 import type { DelegationState } from '../../hooks/useDelegatedKey';
 import { postResponse } from '../../utils/postResponse';
+import { toErrorMessage } from '../../utils/toErrorMessage';
+import { FullScreenError, FullScreenLoading, FullScreenSuccess } from '../atomics/FullScreen';
+
+const CLOSE_DELAY_MS = 1500;
+
+function closeTma() {
+  setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
+}
+
+type Phase =
+  | { kind: 'posting_auth' }
+  | { kind: 'installing_key'; approveRequestId: string }
+  | { kind: 'done'; needsApprove: boolean }
+  | { kind: 'error'; message: string };
 
 export function AuthHandler({
   request,
@@ -16,21 +30,19 @@ export function AuthHandler({
   delegatedKeyState: DelegationState;
   startDelegatedKey: () => void;
 }) {
-  const [authDone, setAuthDone] = React.useState(false);
-  const [approveRequestId, setApproveRequestId] = React.useState<string | null>(null);
-  const [allDone, setAllDone] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const [phase, setPhase] = React.useState<Phase>({ kind: 'posting_auth' });
   const authPostedRef = React.useRef(false);
-  const keyStartedRef = React.useRef(false);
   const approvePostedRef = React.useRef(false);
 
-  // Step 1: post auth response, get back approveRequestId if session key needed
+  // Step 1: post the auth response. Backend may return an approveRequestId for session-key install.
+  // Ref-guarded against StrictMode dev double-fires (effect has [] deps).
   React.useEffect(() => {
     if (authPostedRef.current) return;
     authPostedRef.current = true;
 
     const telegramChatId =
-      window.Telegram?.WebApp?.initDataUnsafe?.user?.id?.toString() ?? request.telegramChatId;
+      window.Telegram?.WebApp?.initDataUnsafe?.user?.id?.toString() ??
+      request.telegramChatId;
 
     postResponse(backendUrl, {
       requestId: request.requestId,
@@ -39,39 +51,34 @@ export function AuthHandler({
       telegramChatId,
     })
       .then((body) => {
-        setAuthDone(true);
-        const b = body as { approveRequestId?: string } | null;
-        if (b?.approveRequestId) {
-          setApproveRequestId(b.approveRequestId);
+        const approveRequestId = (body as { approveRequestId?: string } | null)?.approveRequestId;
+        if (approveRequestId) {
+          setPhase({ kind: 'installing_key', approveRequestId });
         } else {
-          setAllDone(true);
-          setTimeout(() => window.Telegram?.WebApp?.close(), 1500);
+          setPhase({ kind: 'done', needsApprove: false });
+          closeTma();
         }
       })
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
+      .catch((err: unknown) => setPhase({ kind: 'error', message: toErrorMessage(err) }));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Step 2: start session key creation once idle
+  // Step 2: once we know approval is needed, kick off key install when idle.
   React.useEffect(() => {
-    if (!approveRequestId) return;
-    if (keyStartedRef.current) return;
+    if (phase.kind !== 'installing_key') return;
     if (delegatedKeyState.status !== 'idle') return;
-    keyStartedRef.current = true;
     startDelegatedKey();
-  }, [approveRequestId, delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [phase.kind, delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Step 3: once key is installed, post the approve response
+  // Step 3: key installed → post the approve response, then close.
   React.useEffect(() => {
-    if (!approveRequestId) return;
+    if (phase.kind !== 'installing_key') return;
     if (delegatedKeyState.status !== 'done') return;
     if (approvePostedRef.current) return;
     approvePostedRef.current = true;
 
-    const record = delegatedKeyState.record;
+    const { record } = delegatedKeyState;
     postResponse(backendUrl, {
-      requestId: approveRequestId,
+      requestId: phase.approveRequestId,
       requestType: 'approve',
       privyToken,
       subtype: 'session_key',
@@ -85,68 +92,24 @@ export function AuthHandler({
       },
     })
       .then(() => {
-        setAllDone(true);
-        setTimeout(() => window.Telegram?.WebApp?.close(), 1500);
+        setPhase({ kind: 'done', needsApprove: true });
+        closeTma();
       })
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-  }, [approveRequestId, delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
+      .catch((err: unknown) => setPhase({ kind: 'error', message: toErrorMessage(err) }));
+  }, [phase, delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-4">
-        <p className="text-sm text-red-400 text-center">{error}</p>
-      </div>
-    );
-  }
+  if (phase.kind === 'error') return <FullScreenError message={phase.message} />;
 
-  if (allDone) {
-    return (
-      <div className="flex items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6">
-        <div className="flex flex-col items-center gap-5 bg-[#161624] border border-white/10 rounded-2xl p-8 w-full max-w-xs shadow-[0_24px_80px_rgba(124,58,237,0.12)]">
-          <div className="relative">
-            <div className="absolute inset-0 rounded-2xl bg-violet-500/20 blur-xl scale-[1.8]" />
-            <div className="relative flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600/20 to-emerald-600/10 border border-violet-500/20">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z"
-                  fill="url(#auth-ok-shield)" />
-                <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                <defs>
-                  <linearGradient id="auth-ok-shield" x1="3" y1="2" x2="21" y2="23" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="#7c3aed" />
-                    <stop offset="1" stopColor="#34d399" />
-                  </linearGradient>
-                </defs>
-              </svg>
-            </div>
-          </div>
-          <div className="text-center">
-            <p className="text-white font-bold text-lg tracking-tight">
-              {approveRequestId ? 'All Set' : 'Connected to Aegis'}
-            </p>
-            <p className="text-white/40 text-sm mt-1.5">Taking you back to Telegram…</p>
-          </div>
-          <div className="flex items-center gap-2 text-[11px] text-white/20">
-            <div className="w-3.5 h-3.5 rounded-full border-2 border-white/15 border-t-white/50 animate-spin" />
-            Closing automatically
-          </div>
-        </div>
-      </div>
-    );
+  if (phase.kind === 'done') {
+    return <FullScreenSuccess title={phase.needsApprove ? 'All Set' : 'Connected to Aegis'} />;
   }
 
   const step =
     delegatedKeyState.status === 'processing'
       ? delegatedKeyState.step
-      : authDone && approveRequestId
+      : phase.kind === 'installing_key'
         ? 'Installing session key…'
         : null;
 
-  return (
-    <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-4">
-      <div className="w-8 h-8 rounded-full border-2 border-violet-500/20 border-t-violet-500 animate-spin" />
-      {step && <p className="text-sm text-white/40">{step}</p>}
-    </div>
-  );
+  return <FullScreenLoading step={step} />;
 }

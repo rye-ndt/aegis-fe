@@ -27,7 +27,6 @@ export interface ApproveRequest extends BaseRequest {
   requestType: 'approve';
   userId: string;
   subtype: ApproveSubtype;
-  suggestedTokens?: Array<{ address: string; symbol: string; decimals: number }>;
   reapproval?: boolean;
   tokenAddress?: string;
   amountRaw?: string;
@@ -52,7 +51,7 @@ export interface SignResponse extends BaseResponse {
   rejected?: boolean;
 }
 
-export interface DelegationRecord {
+interface DelegationRecordDto {
   publicKey: string;
   address: `0x${string}`;
   smartAccountAddress: `0x${string}`;
@@ -61,17 +60,10 @@ export interface DelegationRecord {
   grantedAt: number;
 }
 
-export interface AegisGrant {
-  sessionKeyAddress: string;
-  smartAccountAddress: string;
-  tokens: Array<{ address: string; limit: string; validUntil: number }>;
-}
-
 export interface ApproveResponse extends BaseResponse {
   requestType: 'approve';
   subtype: ApproveSubtype;
-  delegationRecord?: DelegationRecord;
-  aegisGrant?: AegisGrant;
+  delegationRecord?: DelegationRecordDto;
   rejected?: boolean;
 }
 
