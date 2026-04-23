@@ -6,6 +6,7 @@ import { useRequest } from './hooks/useRequest';
 import { AuthHandler } from './components/handlers/AuthHandler';
 import { SignHandler } from './components/handlers/SignHandler';
 import { ApproveHandler } from './components/handlers/ApproveHandler';
+import { OnrampHandler } from './components/handlers/OnrampHandler';
 import { StatusView } from './components/StatusView';
 import { usePrivyToken } from './hooks/privy';
 import { LoadingSpinner } from './components/atomics/spinner';
@@ -123,5 +124,7 @@ export default function App() {
           startDelegatedKey={delegatedKey.start}
         />
       );
+    case 'onramp':
+      return <OnrampHandler request={request} />;
   }
 }

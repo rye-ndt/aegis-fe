@@ -1,4 +1,4 @@
-export type RequestType = 'auth' | 'sign' | 'approve';
+export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 
 interface BaseRequest {
@@ -32,7 +32,16 @@ export interface ApproveRequest extends BaseRequest {
   amountRaw?: string;
 }
 
-export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest;
+export interface OnrampRequest extends BaseRequest {
+  requestType: 'onramp';
+  userId: string;
+  amount: number;
+  asset: string;
+  chainId: number;
+  walletAddress: string;
+}
+
+export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest | OnrampRequest;
 
 interface BaseResponse {
   requestId: string;

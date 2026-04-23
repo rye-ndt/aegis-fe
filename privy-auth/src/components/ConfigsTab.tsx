@@ -1,37 +1,15 @@
 import React from "react";
-import { useFetch } from "../hooks/useFetch";
-
-type GrantPermission = {
-  tokenAddress?: string;
-  symbol?: string;
-  name?: string;
-  maxAmount?: string | number;
-  validUntil?: number;
-  spent?: string | number;
-};
-
-function parseGrants(body: unknown): GrantPermission[] {
-  const data = (body ?? {}) as Record<string, unknown>;
-  return (data.grants ??
-    data.delegations ??
-    data.permissions ??
-    data.items ??
-    (Array.isArray(body) ? body : [])) as GrantPermission[];
-}
+import { useDelegations, type GrantPermission } from "../hooks/useAppData";
 
 export function ConfigsTab({
   eoaAddress,
   smartAddress,
   delegatedAddress,
-  backendUrl,
-  privyToken,
   removeKey,
 }: {
   eoaAddress: string;
   smartAddress: string;
   delegatedAddress: string | null;
-  backendUrl: string;
-  privyToken: string;
   removeKey: () => Promise<void>;
 }) {
   const [showModal, setShowModal] = React.useState(false);
@@ -109,7 +87,7 @@ export function ConfigsTab({
         )}
       </div>
 
-      <PermissionsSection backendUrl={backendUrl} privyToken={privyToken} />
+      <PermissionsSection />
 
       {showModal && (
         <RemoveAgentModal
@@ -171,25 +149,8 @@ function AddressCard({
   );
 }
 
-function PermissionsSection({
-  backendUrl,
-  privyToken,
-}: {
-  backendUrl: string;
-  privyToken: string;
-}) {
-  const {
-    data: grants,
-    loading,
-    error,
-  } = useFetch<GrantPermission[]>(
-    privyToken && backendUrl ? `${backendUrl}/delegation/grant` : null,
-    {
-      headers: { Authorization: `Bearer ${privyToken}` },
-      transform: parseGrants,
-      errorMessage: "Could not load permissions",
-    },
-  );
+function PermissionsSection() {
+  const { data: grants, loading, error } = useDelegations();
 
   return (
     <div className="flex flex-col gap-3">
@@ -235,13 +196,19 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
   const truncateAddr = (addr: string) =>
     addr.length > 10 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
 
-  const formatAmount = (raw: string | number | undefined) => {
-    if (raw == null) return "—";
-    const n = parseFloat(String(raw));
-    if (isNaN(n)) return String(raw);
-    if (n >= 1e18) return `${(n / 1e18).toFixed(4)} (18 dec)`;
-    if (n >= 1e6)
-      return (n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const scaleRaw = (raw: string | undefined, decimals: number | undefined) => {
+    if (raw == null) return null;
+    try {
+      const n = Number(BigInt(raw)) / 10 ** (decimals ?? 0);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? n / 10 ** (decimals ?? 0) : null;
+    }
+  };
+
+  const formatAmount = (n: number | null) => {
+    if (n == null) return "—";
     return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
   };
 
@@ -254,16 +221,15 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
     });
   };
 
-  const label = grant.symbol ?? truncateAddr(grant.tokenAddress ?? "");
+  const label = grant.tokenSymbol ?? truncateAddr(grant.tokenAddress ?? "");
   const expiry = formatExpiry(grant.validUntil);
   const isExpired =
     grant.validUntil != null && grant.validUntil * 1000 < Date.now();
-  const spentRaw = grant.spent != null ? parseFloat(String(grant.spent)) : null;
-  const maxRaw =
-    grant.maxAmount != null ? parseFloat(String(grant.maxAmount)) : null;
+  const spent = scaleRaw(grant.spentRaw, grant.tokenDecimals);
+  const max = scaleRaw(grant.limitRaw, grant.tokenDecimals);
   const pct =
-    spentRaw != null && maxRaw != null && maxRaw > 0
-      ? Math.min(100, (spentRaw / maxRaw) * 100)
+    spent != null && max != null && max > 0
+      ? Math.min(100, (spent / max) * 100)
       : null;
 
   return (
@@ -274,7 +240,7 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-lg bg-violet-500/10 border border-violet-500/15 flex items-center justify-center">
             <span className="text-[8px] font-bold text-violet-400">
-              {(grant.symbol ?? "?").slice(0, 3).toUpperCase()}
+              {(grant.tokenSymbol ?? "?").slice(0, 3).toUpperCase()}
             </span>
           </div>
           <p className="text-xs font-semibold text-white/85">{label}</p>
@@ -289,7 +255,8 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-white/35">Spending limit</span>
         <span className="text-white/65 font-mono">
-          {formatAmount(grant.maxAmount)}
+          {formatAmount(max)}
+          {grant.tokenSymbol ? ` ${grant.tokenSymbol}` : ""}
         </span>
       </div>
 

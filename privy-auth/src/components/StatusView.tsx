@@ -1,5 +1,6 @@
 import React from 'react';
 import type { DelegationState } from '../hooks/useDelegatedKey';
+import { AppDataProvider } from '../hooks/useAppData';
 import { HomeTab } from './HomeTab';
 import { ConfigsTab } from './ConfigsTab';
 import { DebugTab } from './DebugTab';
@@ -26,24 +27,22 @@ export function StatusView({
   const [tab, setTab] = React.useState<Tab>('home');
 
   return (
-    <div className="w-full min-h-dvh bg-[#0f0f1a] overflow-y-auto">
-      {tab === 'home' && (
-        <HomeTab backendUrl={backendUrl} privyToken={privyToken} delegationState={delegationState} />
-      )}
-      {tab === 'configs' && (
-        <ConfigsTab
-          eoaAddress={eoaAddress}
-          smartAddress={smartAddress}
-          delegatedAddress={delegatedAddress}
-          backendUrl={backendUrl}
-          privyToken={privyToken}
-          removeKey={removeKey}
-        />
-      )}
-      {tab === 'debug' && <DebugTab />}
+    <AppDataProvider backendUrl={backendUrl} privyToken={privyToken}>
+      <div className="w-full min-h-dvh bg-[#0f0f1a] overflow-y-auto">
+        {tab === 'home' && <HomeTab delegationState={delegationState} />}
+        {tab === 'configs' && (
+          <ConfigsTab
+            eoaAddress={eoaAddress}
+            smartAddress={smartAddress}
+            delegatedAddress={delegatedAddress}
+            removeKey={removeKey}
+          />
+        )}
+        {tab === 'debug' && <DebugTab />}
 
-      <TabDock active={tab} onChange={setTab} />
-    </div>
+        <TabDock active={tab} onChange={setTab} />
+      </div>
+    </AppDataProvider>
   );
 }
 

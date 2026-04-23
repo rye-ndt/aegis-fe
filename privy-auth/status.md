@@ -1,5 +1,24 @@
 # Privy Auth Mini-App — Status Log
 
+## Onramp — 2026-04-23
+
+Added `requestType: 'onramp'` handled by `components/handlers/OnrampHandler.tsx`.
+
+**Payload** (`OnrampRequest` in `src/types/miniAppRequest.types.ts`):
+`{ amount: number, asset: 'USDC', chainId: number, walletAddress: string }`.
+`walletAddress` is the user's **smart account** address — not the embedded EOA.
+
+**Behaviour:**
+- Auto-invokes `useFundWallet().fundWallet({ address, options })` on mount once `ready && authenticated`. No extra click — the Telegram button click was the confirmation.
+- Passes `address: request.walletAddress` explicitly so Privy funds the smart account, not the embedded EOA (the default). Silent mismatch here would deliver funds to an address the app doesn't treat as the user's wallet.
+- `chain: { id: request.chainId }` — Privy's `ChainLikeWithId = { id: number }`, so no helper file needed.
+- `asset: 'USDC' | 'native-currency'` — backend currently only emits USDC.
+- Errors (unsupported chain, modal closed) render a retry button plus the monospace smart-account address as a manual-deposit fallback.
+
+**Convention introduced:** a request handler may auto-invoke its primary action on mount (no confirmation screen) when the user has already confirmed upstream. Keeps the "minimal-clicks for non-web3 users" goal intact.
+
+**Not wired:** on-chain deposit settlement detection — that belongs on the backend.
+
 ## Overview
 A Telegram Mini App (TMA) front end for **Aegis**, an onchain AI agent. Handles
 Privy auth (Google + Telegram auto-login), ERC-4337 smart-wallet provisioning,
@@ -357,3 +376,36 @@ inline.
 monkey-patch at module load (captures only lines containing `[AEGIS:`,
 ring buffer cap 200). `DebugTab` renders the entries. Import the hook,
 not a "DebugLog component" — the latter was removed.
+
+## 2026-04-23 — ConfigsTab permissions field alignment
+`GrantPermission` type and `GrantRow` were reading `symbol` / `maxAmount` /
+`spent` off the `/delegation/grant` response, but the BE contract
+(`TokenDelegation` in `be/.../tokenDelegation.repo.ts`) uses `tokenSymbol`,
+`limitRaw`, `spentRaw`, `tokenDecimals`. The mismatch left the spending-limit
+cell rendering "—" for every grant. Renamed the FE fields to match, and
+`GrantRow` now scales `limitRaw` / `spentRaw` by `tokenDecimals` via BigInt
+before formatting (raw values are bigint strings over the wire, not
+human-readable amounts). **Convention**: when surfacing delegation rows, always
+divide `limitRaw`/`spentRaw` by `10 ** tokenDecimals` — never display raw.
+
+## 2026-04-23 — tab-switch refetch fix (global AppData store)
+`HomeTab` and `ConfigsTab` each called `useFetch` directly, so every tab switch
+unmounted the consumer and re-fired `GET /portfolio` / `GET /delegation/grant`.
+Hoisted both fetches into `src/hooks/useAppData.tsx`:
+- `AppDataProvider` wraps `StatusView`'s tab area (mounted once, survives tab
+  switches) and owns both `useFetch` calls.
+- Consumers call `usePortfolio()` / `useDelegations()` — same
+  `{ data, loading, error }` shape as `useFetch` so no call-site logic changed.
+- Parsers (`parsePortfolio`, `parseGrants`) and shared types (`PortfolioToken`,
+  `GrantPermission`) now live in `useAppData.tsx` as the single source of truth;
+  the per-tab copies were deleted.
+- `HomeTab` / `ConfigsTab` no longer take `backendUrl` or `privyToken` props —
+  they read from context.
+
+**Convention**: shared cross-tab backend data belongs in `AppDataProvider`.
+Add new endpoints by extending `AppData` + exposing a `useXxx()` selector;
+do not call `useFetch` inline in a tab that can be unmounted by `TabDock`.
+Refreshing after mutations (e.g. after `POST /delegation/grant` in
+`ApprovalOnboarding`) is **not** yet wired — provider lifetime ≈ one
+authenticated session; a `refetch()` on the resource is the right extension
+point when that becomes a requirement.

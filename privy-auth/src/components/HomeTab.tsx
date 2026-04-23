@@ -1,42 +1,12 @@
 import { usePrivy } from '@privy-io/react-auth';
 import type { DelegationState } from '../hooks/useDelegatedKey';
-import { useFetch } from '../hooks/useFetch';
+import { usePortfolio, type PortfolioToken } from '../hooks/useAppData';
 import { ShieldIcon } from './atomics/icons';
 import { Spinner } from './atomics/spinner';
 
-type PortfolioToken = {
-  symbol?: string;
-  name?: string;
-  balance?: string | number;
-  usdValue?: string | number | null;
-};
-
-function parsePortfolio(body: unknown): PortfolioToken[] {
-  const data = (body ?? {}) as Record<string, unknown>;
-  const raw = (data.tokens ?? data.balances ?? data.items ?? []) as PortfolioToken[];
-  return [...raw]
-    .sort((a, b) => (parseFloat(String(b.usdValue ?? 0)) || 0) - (parseFloat(String(a.usdValue ?? 0)) || 0))
-    .slice(0, 10);
-}
-
-export function HomeTab({
-  backendUrl,
-  privyToken,
-  delegationState,
-}: {
-  backendUrl: string;
-  privyToken: string;
-  delegationState: DelegationState;
-}) {
+export function HomeTab({ delegationState }: { delegationState: DelegationState }) {
   const { authenticated, user } = usePrivy();
-  const { data: tokens, loading, error } = useFetch<PortfolioToken[]>(
-    privyToken && backendUrl ? `${backendUrl}/portfolio` : null,
-    {
-      headers: { Authorization: `Bearer ${privyToken}` },
-      transform: parsePortfolio,
-      errorMessage: 'Could not load balance',
-    },
-  );
+  const { data: tokens, loading, error } = usePortfolio();
 
   const totalUsd = tokens?.reduce((sum, t) => sum + (parseFloat(String(t.usdValue ?? 0)) || 0), 0) ?? 0;
 
