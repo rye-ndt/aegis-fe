@@ -1,10 +1,20 @@
 import React from 'react';
 import { usePrivy } from '@privy-io/react-auth';
 import { useDebugEntries } from './DebugLog';
+import type { DelegationState } from '../hooks/useDelegatedKey';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Tab = 'home' | 'configs' | 'debug';
+
+type GrantPermission = {
+  tokenAddress?: string;
+  symbol?: string;
+  name?: string;
+  maxAmount?: string | number;
+  validUntil?: number;
+  spent?: string | number;
+};
 
 type PortfolioToken = {
   symbol?: string;
@@ -52,6 +62,44 @@ function usePortfolio(backendUrl: string, privyToken: string) {
   }, [backendUrl, privyToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { tokens, loading, error };
+}
+
+// ── Grant permissions hook ─────────────────────────────────────────────────────
+
+function useGrantPermissions(backendUrl: string, privyToken: string, enabled: boolean) {
+  const [grants, setGrants] = React.useState<GrantPermission[] | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled || !privyToken || !backendUrl) return;
+    setLoading(true);
+    setError(null);
+    fetch(`${backendUrl}/delegation/grant`, {
+      headers: { Authorization: `Bearer ${privyToken}` },
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json() as Promise<Record<string, unknown>>;
+      })
+      .then(data => {
+        const raw = (
+          data.grants ??
+          data.delegations ??
+          data.permissions ??
+          data.items ??
+          (Array.isArray(data) ? data : [])
+        ) as GrantPermission[];
+        setGrants(raw);
+        setLoading(false);
+      })
+      .catch(() => {
+        setError('Could not load permissions');
+        setLoading(false);
+      });
+  }, [enabled, backendUrl, privyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { grants, loading, error };
 }
 
 // ── Tab icons ─────────────────────────────────────────────────────────────────
@@ -176,7 +224,15 @@ function RemoveAgentModal({
 
 // ── Home tab ──────────────────────────────────────────────────────────────────
 
-function HomeTab({ backendUrl, privyToken }: { backendUrl: string; privyToken: string }) {
+function HomeTab({
+  backendUrl,
+  privyToken,
+  delegationState,
+}: {
+  backendUrl: string;
+  privyToken: string;
+  delegationState: DelegationState;
+}) {
   const { authenticated, user } = usePrivy();
   const { tokens, loading, error } = usePortfolio(backendUrl, privyToken);
 
@@ -278,21 +334,161 @@ function HomeTab({ backendUrl, privyToken }: { backendUrl: string; privyToken: s
           </div>
         )}
       </div>
+
+      {/* Agent setup banner — shown while auto-creating keypair */}
+      {delegationState.status === 'processing' && (
+        <div className="w-full flex items-center gap-3 bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-3">
+          <div className="w-4 h-4 flex-shrink-0 rounded-full border-2 border-violet-400/30 border-t-violet-400 animate-spin" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-violet-300">Setting up AI Agent</p>
+            <p className="text-[11px] text-violet-400/60 truncate mt-0.5">{delegationState.step}</p>
+          </div>
+        </div>
+      )}
+
+      {delegationState.status === 'error' && (
+        <div className="w-full flex items-center gap-3 bg-red-500/8 border border-red-500/20 rounded-xl px-4 py-3">
+          <div className="w-4 h-4 flex-shrink-0 rounded-full bg-red-500/20 border border-red-500/30 flex items-center justify-center">
+            <span className="text-red-400 text-[9px] font-bold leading-none">!</span>
+          </div>
+          <p className="text-xs text-red-400/80 flex-1 min-w-0 truncate">{delegationState.message}</p>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Configs tab ───────────────────────────────────────────────────────────────
 
+function PermissionsSection({
+  backendUrl,
+  privyToken,
+}: {
+  backendUrl: string;
+  privyToken: string;
+}) {
+  const { grants, loading, error } = useGrantPermissions(backendUrl, privyToken, true);
+
+  const formatAmount = (raw: string | number | undefined) => {
+    if (raw == null) return '—';
+    const n = parseFloat(String(raw));
+    if (isNaN(n)) return String(raw);
+    if (n >= 1e18) return `${(n / 1e18).toFixed(4)} (18 dec)`;
+    if (n >= 1e6) return (n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  };
+
+  const formatExpiry = (ts: number | undefined) => {
+    if (!ts) return null;
+    return new Date(ts * 1000).toLocaleDateString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+    });
+  };
+
+  const truncateAddr = (addr: string) =>
+    addr.length > 10 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-[10px] font-semibold tracking-widest text-white/20 uppercase px-0.5">
+        What the agent can do
+      </p>
+
+      {loading && (
+        <div className="flex flex-col gap-2">
+          {[...Array(2)].map((_, i) => (
+            <div key={i} className="h-16 bg-white/[0.03] border border-white/[0.05] rounded-xl animate-pulse" />
+          ))}
+        </div>
+      )}
+
+      {!loading && error && (
+        <div className="flex items-center justify-center h-14 bg-white/[0.03] border border-white/[0.05] rounded-xl">
+          <p className="text-[11px] text-white/25">{error}</p>
+        </div>
+      )}
+
+      {!loading && !error && grants?.length === 0 && (
+        <div className="flex items-center justify-center h-14 bg-white/[0.03] border border-white/[0.05] rounded-xl">
+          <p className="text-[11px] text-white/25">No spending permissions granted</p>
+        </div>
+      )}
+
+      {!loading && !error && grants && grants.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {grants.map((g, i) => {
+            const label = g.symbol ?? truncateAddr(g.tokenAddress ?? '');
+            const expiry = formatExpiry(g.validUntil);
+            const isExpired = g.validUntil != null && g.validUntil * 1000 < Date.now();
+            const spentRaw = g.spent != null ? parseFloat(String(g.spent)) : null;
+            const maxRaw = g.maxAmount != null ? parseFloat(String(g.maxAmount)) : null;
+            const pct = spentRaw != null && maxRaw != null && maxRaw > 0
+              ? Math.min(100, (spentRaw / maxRaw) * 100)
+              : null;
+
+            return (
+              <div key={i} className={`bg-white/[0.03] border rounded-xl px-4 py-3.5 flex flex-col gap-2 ${isExpired ? 'border-white/[0.05] opacity-50' : 'border-white/[0.07]'}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg bg-violet-500/10 border border-violet-500/15 flex items-center justify-center">
+                      <span className="text-[8px] font-bold text-violet-400">
+                        {(g.symbol ?? '?').slice(0, 3).toUpperCase()}
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-white/85">{label}</p>
+                  </div>
+                  {isExpired && (
+                    <span className="text-[9px] text-red-400/70 font-semibold uppercase tracking-wide">Expired</span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-white/35">Spending limit</span>
+                  <span className="text-white/65 font-mono">{formatAmount(g.maxAmount)}</span>
+                </div>
+
+                {pct !== null && (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-white/25">Used</span>
+                      <span className="text-white/40">{pct.toFixed(1)}%</span>
+                    </div>
+                    <div className="h-1 bg-white/[0.06] rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${pct > 80 ? 'bg-red-400/60' : 'bg-violet-400/60'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {expiry && (
+                  <p className="text-[10px] text-white/25">
+                    {isExpired ? 'Expired' : 'Expires'} {expiry}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConfigsTab({
   eoaAddress,
   smartAddress,
   delegatedAddress,
+  backendUrl,
+  privyToken,
   removeKey,
 }: {
   eoaAddress: string;
   smartAddress: string;
   delegatedAddress: string | null;
+  backendUrl: string;
+  privyToken: string;
   removeKey: () => Promise<void>;
 }) {
   const [showModal, setShowModal] = React.useState(false);
@@ -359,6 +555,9 @@ function ConfigsTab({
           </div>
         )}
       </div>
+
+      {/* Permissions */}
+      <PermissionsSection backendUrl={backendUrl} privyToken={privyToken} />
 
       {showModal && (
         <RemoveAgentModal
@@ -485,6 +684,7 @@ export function StatusView({
   privyToken,
   backendUrl,
   delegatedAddress,
+  delegationState,
   removeKey,
 }: {
   eoaAddress: string;
@@ -492,6 +692,7 @@ export function StatusView({
   privyToken: string;
   backendUrl: string;
   delegatedAddress: string | null;
+  delegationState: DelegationState;
   removeKey: () => Promise<void>;
 }) {
   const [tab, setTab] = React.useState<Tab>('home');
@@ -499,13 +700,19 @@ export function StatusView({
   return (
     <div className="w-full min-h-dvh bg-[#0f0f1a] overflow-y-auto">
       {tab === 'home' && (
-        <HomeTab backendUrl={backendUrl} privyToken={privyToken} />
+        <HomeTab
+          backendUrl={backendUrl}
+          privyToken={privyToken}
+          delegationState={delegationState}
+        />
       )}
       {tab === 'configs' && (
         <ConfigsTab
           eoaAddress={eoaAddress}
           smartAddress={smartAddress}
           delegatedAddress={delegatedAddress}
+          backendUrl={backendUrl}
+          privyToken={privyToken}
           removeKey={removeKey}
         />
       )}
