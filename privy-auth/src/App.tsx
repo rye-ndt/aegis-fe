@@ -64,7 +64,7 @@ export default function App() {
   // Skip entirely for auth requests — AuthHandler calls start() directly.
   // The ref prevents re-triggering on status changes mid-flow.
   const autoKeyStartedRef = React.useRef(false);
-  const isAuthRequest = request?.requestType === 'auth';
+  const isAuthRequest = request?.requestType === "auth";
   React.useEffect(() => {
     if (!authenticated || !smartAddress || !eoaAddress) return;
     if (delegatedKey.state.status !== "idle") return;
@@ -99,7 +99,9 @@ export default function App() {
 
   // ── No requestId — auth-gated status page ──────────────────────────────────
   const delegatedAddress =
-    delegatedKey.state.status === 'done' ? delegatedKey.state.record.address : null;
+    delegatedKey.state.status === "done"
+      ? delegatedKey.state.record.address
+      : null;
 
   if (!requestId) {
     return (

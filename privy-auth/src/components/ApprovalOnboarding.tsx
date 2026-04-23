@@ -29,6 +29,9 @@ interface ApprovalOnboardingProps {
     state: DelegationState;
     start: () => void;
   };
+  reapproval?: boolean;
+  tokenAddress?: string;
+  amountRaw?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +75,13 @@ function Spinner() {
 // Component
 // ---------------------------------------------------------------------------
 
-export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboardingProps) {
+export function ApprovalOnboarding({
+  backendJwt,
+  delegatedKey,
+  reapproval = false,
+  tokenAddress,
+  amountRaw,
+}: ApprovalOnboardingProps) {
   const [approvalParams, setApprovalParams] = React.useState<ApprovalParam[] | null>(null);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [isApproveClicked, setIsApproveClicked] = React.useState(false);
@@ -80,12 +89,8 @@ export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboard
   const [postError, setPostError] = React.useState<string | null>(null);
   const [success, setSuccess] = React.useState(false);
 
-  // ── On mount: read URL params + fetch suggested limits ───────────────────
+  // ── On mount: fetch suggested limits using props (never read URL) ─────────
   React.useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const tokenAddress = params.get('tokenAddress');
-    const amountRaw = params.get('amountRaw');
-
     const qs = tokenAddress && amountRaw
       ? `?tokenAddress=${encodeURIComponent(tokenAddress)}&amountRaw=${encodeURIComponent(amountRaw)}`
       : '';
@@ -151,9 +156,7 @@ export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboard
     delegatedKey.start();
   }, [delegatedKey]);
 
-  // ── Determine re-approval mode from URL ───────────────────────────────────
-  const params = new URLSearchParams(window.location.search);
-  const isReapproval = params.get('reapproval') === '1';
+  const isReapproval = reapproval;
 
   // ── Compute composite UI states ───────────────────────────────────────────
   const isInstalling =

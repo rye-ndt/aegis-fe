@@ -4,7 +4,7 @@
 function cloudStorageSupported(): boolean {
   const cs = window.Telegram?.WebApp?.CloudStorage;
   if (!cs) return false;
-  const version = parseFloat(window.Telegram?.WebApp?.version ?? '0');
+  const version = parseFloat((window.Telegram?.WebApp as any)?.version ?? '0');
   return version >= 6.9;
 }
 

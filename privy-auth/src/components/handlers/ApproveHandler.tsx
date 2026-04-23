@@ -2,6 +2,7 @@ import React from 'react';
 import type { ApproveRequest } from '../../types/miniAppRequest.types';
 import type { DelegationState } from '../../hooks/useDelegatedKey';
 import { postResponse } from '../../utils/postResponse';
+import { ApprovalOnboarding } from '../ApprovalOnboarding';
 
 export function ApproveHandler({
   request,
@@ -109,25 +110,14 @@ export function ApproveHandler({
     );
   }
 
-  // aegis_guard: not yet implemented
+  // aegis_guard: render the ApprovalOnboarding flow (spending-limit grant).
   return (
-    <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-4">
-      <p className="text-sm text-white/40 text-center">AegisGuard setup is not yet available.</p>
-      <button
-        onClick={() => {
-          postResponse(backendUrl, {
-            requestId: request.requestId,
-            requestType: 'approve',
-            privyToken,
-            subtype: 'aegis_guard',
-            rejected: true,
-          }).catch(() => {});
-          window.Telegram?.WebApp?.close();
-        }}
-        className="text-xs text-red-400 underline underline-offset-2"
-      >
-        Cancel
-      </button>
-    </div>
+    <ApprovalOnboarding
+      backendJwt={privyToken}
+      delegatedKey={{ state: delegatedKeyState, start: startDelegatedKey }}
+      reapproval={request.reapproval === true}
+      tokenAddress={request.tokenAddress}
+      amountRaw={request.amountRaw}
+    />
   );
 }

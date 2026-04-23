@@ -41,23 +41,6 @@ function truncateHex(hex: string, chars = 8): string {
   return `${hex.slice(0, chars + 2)}…${hex.slice(-chars)}`;
 }
 
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) return 'None';
-  if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return value.toString();
-  if (typeof value === 'string') {
-    // Address
-    if (/^0x[0-9a-fA-F]{40}$/.test(value)) return truncateHex(value, 6);
-    // Bytes / hex
-    if (/^0x[0-9a-fA-F]*$/.test(value)) return truncateHex(value);
-    return value;
-  }
-  if (Array.isArray(value)) return value.map(formatValue).join(', ');
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
-}
-
 function decodeKernelEnable(
   domain: Record<string, unknown>,
   message: Record<string, unknown>,
@@ -181,11 +164,6 @@ export function decodeEip712(typedDataJson: string): HumanReadableSigningRequest
   }
 
   // Best-effort generic decode
-  const fields: { label: string; value: string }[] = Object.entries(message).map(([k, v]) => ({
-    label: k.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase()),
-    value: formatValue(v),
-  }));
-
   return {
     type: 'unknown',
     summary: `Sign a ${primaryType} request`,

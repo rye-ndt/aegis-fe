@@ -8,7 +8,7 @@ import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
 import { toECDSASigner } from '@zerodev/permissions/signers';
 import { toPermissionValidator, serializePermissionAccount, deserializePermissionAccount } from '@zerodev/permissions';
 import { toSudoPolicy } from '@zerodev/permissions/policies';
-import type { EIP1193Provider, Hex } from 'viem';
+import type { EIP1193Provider } from 'viem';
 import type { KernelAccountClient } from '@zerodev/sdk';
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,6 @@ export async function createSessionKeyClient(
     account,
     chain: avalancheFuji,
     bundlerTransport: http(zerodevRpc),
-    entryPoint,
     ...(paymasterClient && {
       paymaster: {
         getPaymasterData: paymasterClient.getPaymasterData,
