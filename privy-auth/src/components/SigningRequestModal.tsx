@@ -1,5 +1,21 @@
 import React from 'react';
-import type { PendingSigningRequest } from '../hooks/useSigningRequests';
+
+interface SignRequestEvent {
+  type: 'sign_request';
+  requestId: string;
+  to: string;
+  value: string;
+  data: string;
+  description: string;
+  expiresAt: number;
+  autoSign?: boolean;
+}
+
+interface PendingSigningRequest {
+  event: SignRequestEvent;
+  approve: () => Promise<void>;
+  reject: () => void;
+}
 
 function formatValue(wei: string): string {
   try {

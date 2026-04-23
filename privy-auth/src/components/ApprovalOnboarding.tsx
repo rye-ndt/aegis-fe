@@ -1,6 +1,7 @@
 import React from 'react';
 import type { DelegationState } from '../hooks/useDelegatedKey';
 import { cloudStorageRemoveItem } from '../utils/telegramStorage';
+import { loggedFetch } from '../utils/loggedFetch';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,7 +90,7 @@ export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboard
       ? `?tokenAddress=${encodeURIComponent(tokenAddress)}&amountRaw=${encodeURIComponent(amountRaw)}`
       : '';
 
-    fetch(`${backendUrl}/delegation/approval-params${qs}`, {
+    loggedFetch(`${backendUrl}/delegation/approval-params${qs}`, {
       headers: { Authorization: `Bearer ${backendJwt}` },
     })
       .then((r) => {
@@ -122,7 +123,7 @@ export function ApprovalOnboarding({ backendJwt, delegatedKey }: ApprovalOnboard
       validUntil: p.validUntil,
     }));
 
-    fetch(`${backendUrl}/delegation/grant`, {
+    loggedFetch(`${backendUrl}/delegation/grant`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
