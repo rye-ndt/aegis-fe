@@ -24,7 +24,7 @@ function isInsideTelegram() {
 }
 
 export default function App() {
-  const { ready, authenticated, user, getAccessToken } = usePrivy();
+  const { ready, authenticated, user } = usePrivy();
   const { wallets } = useWallets();
   const { client } = useSmartWallets();
   const privyToken = usePrivyToken();
@@ -85,14 +85,18 @@ export default function App() {
   }
 
   // ── No requestId — auth-gated status page ──────────────────────────────────
+  const delegatedAddress =
+    delegatedKey.state.status === 'done' ? delegatedKey.state.record.address : null;
+
   if (!requestId) {
     return (
       <StatusView
         eoaAddress={eoaAddress}
         smartAddress={smartAddress}
         privyToken={privyToken}
-        getAccessToken={getAccessToken}
-        removeKey={import.meta.env.DEV ? delegatedKey.removeKey : undefined}
+        backendUrl={backendUrl}
+        delegatedAddress={delegatedAddress}
+        removeKey={delegatedKey.removeKey}
       />
     );
   }

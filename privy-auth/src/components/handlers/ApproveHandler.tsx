@@ -65,10 +65,33 @@ export function ApproveHandler({
 
     if (delegatedKeyState.status === 'done') {
       return (
-        <div className="flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-4">
-          <div className="text-5xl">✅</div>
-          <p className="text-white font-semibold">Session key ready</p>
-          <p className="text-sm text-white/40">Returning to Telegram…</p>
+        <div className="flex items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6">
+          <div className="flex flex-col items-center gap-5 bg-[#161624] border border-white/10 rounded-2xl p-8 w-full max-w-xs shadow-[0_24px_80px_rgba(124,58,237,0.12)]">
+            <div className="relative">
+              <div className="absolute inset-0 rounded-2xl bg-violet-500/20 blur-xl scale-[1.8]" />
+              <div className="relative flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600/20 to-emerald-600/10 border border-violet-500/20">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V7l-9-5z"
+                    fill="url(#approve-ok-shield)" />
+                  <path d="M9 12l2 2 4-4" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <defs>
+                    <linearGradient id="approve-ok-shield" x1="3" y1="2" x2="21" y2="23" gradientUnits="userSpaceOnUse">
+                      <stop stopColor="#7c3aed" />
+                      <stop offset="1" stopColor="#34d399" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+              </div>
+            </div>
+            <div className="text-center">
+              <p className="text-white font-bold text-lg tracking-tight">Agent Connected</p>
+              <p className="text-white/40 text-sm mt-1.5">Taking you back to Telegram…</p>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-white/20">
+              <div className="w-3.5 h-3.5 rounded-full border-2 border-white/15 border-t-white/50 animate-spin" />
+              Closing automatically
+            </div>
+          </div>
         </div>
       );
     }
