@@ -1,5 +1,66 @@
 # Privy Auth Mini-App — Status Log
 
+## Yield Optimization — 2026-04-24
+
+Two new `SignRequest.kind` values, a `YieldDepositHandler`, and a `YieldPositions` component.
+
+### New `SignRequest.kind` values
+
+`types/miniAppRequest.types.ts` now carries:
+- `SignKind = 'yield_deposit' | 'yield_withdraw'` on the optional `kind` field of `SignRequest`.
+- `TxStep` — per-step tx shape (informational; execution still flows through the existing `to`/`value`/`data` fields + `fetchNextRequest` chaining).
+- `YieldDisplayMeta` — `protocolName`, `tokenSymbol`, `amountHuman`, `expectedApy?`.
+- Additional optional fields on `SignRequest`: `kind`, `chainId`, `protocolId`, `tokenAddress`, `steps`, `displayMeta`.
+
+Routing in `App.tsx`: inside the `'sign'` case, `request.kind === 'yield_deposit' | 'yield_withdraw'` routes to `YieldDepositHandler` before falling through to `SignHandler`.
+
+### `YieldDepositHandler` (`src/components/handlers/YieldDepositHandler.tsx`)
+
+Single file; `mode: 'deposit' | 'withdraw'` prop for copy differences.
+
+**Auto-open-and-sign behaviour** (when `autoSign === true` and `serializedBlob` present): the component opens in `'signing'` phase, immediately fires the session-key pipeline via `createSessionKeyClient` + `sendTransaction`, POSTs the tx hash, and calls `Telegram.WebApp.close()` after 1500ms. The mini-app flashes and closes with no user interaction.
+
+**Fallback / manual path** (when `autoSign === false`, or key unavailable at boot): shows a pre-sign confirmation screen with `displayMeta` detail (protocol, token, amount, APY for deposits). User taps "Deposit"/"Withdraw" → executes via `useSmartWallets().client` (EOA owner path, same as SignHandler manual).
+
+Auto-sign failures (createSessionKeyClient or sendTransaction) fall back to the manual pre-sign screen with an inline error banner.
+
+### `GET /yield/positions` contract
+
+`AppDataProvider` fetches `/yield/positions` and exposes it via `useYieldPositions()`. Response shape:
+```ts
+{ positions: YieldPosition[], totals: { principalHuman, currentValueHuman, pnlHuman } }
+```
+`YieldPosition` fields: `protocolId`, `protocolName`, `chainId`, `tokenSymbol`, `principalHuman`, `currentValueHuman`, `pnlHuman`, `pnl24hHuman`, `apy`.
+
+`parseYieldPositions` in `useAppData.tsx` normalises the response. Types exported: `YieldPosition`, `YieldPositionsData`.
+
+### `YieldPositions` component (`src/components/YieldPositions.tsx`)
+
+Inline section mounted in `HomeTab` below the portfolio list. Per-row: protocol name, token, current value, total PnL, 24h PnL, APY. Empty state: "No active yield positions. Try /yield in Telegram."
+
+Decision: inline section chosen over a dedicated `/positions` route — fewer clicks, matches "don't hide their money" requirement, and the portfolio screen is not crowded.
+
+### Deferred work
+
+- Partial withdrawal UI.
+- Multi-stable display (multiple tokens per protocol).
+- Position historical PnL chart.
+- Protocol logos for non-Aave protocols.
+- **BE must expose `GET /yield/positions`** — the FE contract is live but the backend route is not yet registered. Until it is, `YieldPositions` stays in its empty/error state.
+
+### Review fixes (2026-04-24, same day)
+
+- Verified BE now sets `request.kind = 'yield_deposit' | 'yield_withdraw'` and puts `displayMeta` on step 1 only, so `YieldDepositHandler` actually renders (previously dead code — BE was emitting SignRequests without `kind`).
+- `SignRequest` on BE side now mirrors the FE interface (`kind`, `chainId`, `protocolId`, `tokenAddress`, `displayMeta`).
+
+### New conventions introduced
+
+- Yield-related `SignRequest.kind` values are prefixed `yield_`.
+- Position data is fetched through `AppDataProvider` (`useYieldPositions()`) — never fetch ad hoc from a leaf component.
+- `YieldDepositHandler` is the pattern for yield sign flows: `mode` prop distinguishes deposit vs withdraw in one file.
+
+---
+
 ## /swap — 2026-04-24
 
 SignHandler now supports multi-step swaps by fetching the next queued

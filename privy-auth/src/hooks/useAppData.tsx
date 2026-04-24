@@ -17,11 +17,33 @@ export type GrantPermission = {
   validUntil?: number;
 };
 
+export type YieldPosition = {
+  protocolId: string;
+  protocolName: string;
+  chainId: number;
+  tokenSymbol: string;
+  principalHuman: string;
+  currentValueHuman: string;
+  pnlHuman: string;
+  pnl24hHuman: string;
+  apy: number;
+};
+
+export type YieldPositionsData = {
+  positions: YieldPosition[];
+  totals: {
+    principalHuman: string;
+    currentValueHuman: string;
+    pnlHuman: string;
+  };
+};
+
 type Resource<T> = { data: T | null; loading: boolean; error: string | null };
 
 type AppData = {
   portfolio: Resource<PortfolioToken[]>;
   delegations: Resource<GrantPermission[]>;
+  yieldPositions: Resource<YieldPositionsData>;
 };
 
 function parsePortfolio(body: unknown): PortfolioToken[] {
@@ -43,6 +65,17 @@ function parseGrants(body: unknown): GrantPermission[] {
     data.permissions ??
     data.items ??
     (Array.isArray(body) ? body : [])) as GrantPermission[];
+}
+
+function parseYieldPositions(body: unknown): YieldPositionsData {
+  const data = (body ?? {}) as Record<string, unknown>;
+  const positions = (data.positions ?? []) as YieldPosition[];
+  const totals = (data.totals ?? {
+    principalHuman: '0.00',
+    currentValueHuman: '0.00',
+    pnlHuman: '+0.00',
+  }) as YieldPositionsData['totals'];
+  return { positions, totals };
 }
 
 const AppDataContext = React.createContext<AppData | null>(null);
@@ -79,8 +112,17 @@ export function AppDataProvider({
     },
   );
 
+  const yieldPositions = useFetch<YieldPositionsData>(
+    privyToken && backendUrl ? `${backendUrl}/yield/positions` : null,
+    {
+      headers: authHeaders,
+      transform: parseYieldPositions,
+      errorMessage: 'Could not load yield positions',
+    },
+  );
+
   const value = React.useMemo<AppData>(
-    () => ({ portfolio, delegations }),
+    () => ({ portfolio, delegations, yieldPositions }),
     [
       portfolio.data,
       portfolio.loading,
@@ -88,6 +130,9 @@ export function AppDataProvider({
       delegations.data,
       delegations.loading,
       delegations.error,
+      yieldPositions.data,
+      yieldPositions.loading,
+      yieldPositions.error,
     ],
   );
 
@@ -102,3 +147,4 @@ function useAppData(): AppData {
 
 export const usePortfolio = () => useAppData().portfolio;
 export const useDelegations = () => useAppData().delegations;
+export const useYieldPositions = () => useAppData().yieldPositions;

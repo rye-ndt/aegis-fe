@@ -3,6 +3,7 @@ import type { DelegationState } from '../hooks/useDelegatedKey';
 import { usePortfolio, type PortfolioToken } from '../hooks/useAppData';
 import { ShieldIcon } from './atomics/icons';
 import { Spinner } from './atomics/spinner';
+import { YieldPositions } from './YieldPositions';
 
 export function HomeTab({ delegationState }: { delegationState: DelegationState }) {
   const { authenticated, user } = usePrivy();
@@ -32,6 +33,8 @@ export function HomeTab({ delegationState }: { delegationState: DelegationState 
         error={error}
         totalUsd={totalUsd}
       />
+
+      <YieldPositions />
 
       {delegationState.status === 'processing' && (
         <div className="w-full flex items-center gap-3 bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-3">

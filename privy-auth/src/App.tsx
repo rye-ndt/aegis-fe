@@ -5,6 +5,7 @@ import { useDelegatedKey } from './hooks/useDelegatedKey';
 import { useRequest } from './hooks/useRequest';
 import { AuthHandler } from './components/handlers/AuthHandler';
 import { SignHandler } from './components/handlers/SignHandler';
+import { YieldDepositHandler } from './components/handlers/YieldDepositHandler';
 import { ApproveHandler } from './components/handlers/ApproveHandler';
 import { OnrampHandler } from './components/handlers/OnrampHandler';
 import { StatusView } from './components/StatusView';
@@ -106,6 +107,17 @@ export default function App() {
         />
       );
     case 'sign':
+      if (request.kind === 'yield_deposit' || request.kind === 'yield_withdraw') {
+        return (
+          <YieldDepositHandler
+            request={request}
+            privyToken={privyToken}
+            backendUrl={backendUrl}
+            serializedBlob={delegatedKey.serializedBlob}
+            mode={request.kind === 'yield_deposit' ? 'deposit' : 'withdraw'}
+          />
+        );
+      }
       return (
         <SignHandler
           request={request}

@@ -1,5 +1,20 @@
 export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
+export type SignKind = 'yield_deposit' | 'yield_withdraw';
+
+export type TxStep = {
+  to: string;
+  value: string;    // wei as decimal string
+  data: string;     // 0x calldata
+  description: string;
+};
+
+export interface YieldDisplayMeta {
+  protocolName: string;
+  tokenSymbol: string;
+  amountHuman: string;
+  expectedApy?: number;  // decimal, e.g. 0.0412 — deposit only
+}
 
 interface BaseRequest {
   requestId: string;
@@ -21,6 +36,12 @@ export interface SignRequest extends BaseRequest {
   data: string;           // 0x calldata
   description: string;
   autoSign: boolean;
+  kind?: SignKind;
+  chainId?: number;
+  protocolId?: string;
+  tokenAddress?: string;
+  steps?: TxStep[];
+  displayMeta?: YieldDisplayMeta;
 }
 
 export interface ApproveRequest extends BaseRequest {
