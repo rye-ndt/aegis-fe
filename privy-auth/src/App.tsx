@@ -124,6 +124,7 @@ export default function App() {
           privyToken={privyToken}
           backendUrl={backendUrl}
           serializedBlob={delegatedKey.serializedBlob}
+          keyStatus={delegatedKey.state.status}
         />
       );
     case 'approve':

@@ -519,3 +519,143 @@ Refreshing after mutations (e.g. after `POST /delegation/grant` in
 `ApprovalOnboarding`) is **not** yet wired — provider lifetime ≈ one
 authenticated session; a `refetch()` on the resource is the right extension
 point when that becomes a requirement.
+
+## 2026-04-24 — SignHandler auto-sign race with key unlock
+**What**: `SignHandler` armed a 10s `AUTO_SIGN_TIMEOUT_MS` fallback whenever
+`serializedBlob` was null, without distinguishing "key is still being
+restored" from "no key available". On the /send flow, clicking the
+"Execute Automatically" mini-app button mounts `SignHandler` concurrently
+with `delegatedKey.unlock()` (async CloudStorage decrypt). If unlock was
+slower than the timer (slow TG webview, cold start), the handler flipped
+to `showManual = true` and the manual `SigningRequestModal` popped over
+the "Signing with your delegated key" loader — even though auto-sign had
+not actually failed.
+
+**Fix**: `SignHandler` now takes a `keyStatus: DelegationState['status']`
+prop (wired from `App.tsx`). The fallback timer only arms when
+`keyStatus !== 'processing'`; while the key machine is mid-unlock the
+handler waits indefinitely. Once unlock settles (`done` with blob →
+auto-sign; `idle`/`error` without blob → arm the 10s fallback as before).
+
+**Why this approach**: raising the timeout (option 2) just masks the
+race. Awaiting unlock in `App.tsx` before rendering `SignHandler`
+(option 3) delays paint and couples render ordering to a hook side
+effect. Gating on `keyStatus` keeps the handler self-contained and makes
+"still unlocking" vs. "truly missing" a first-class distinction.
+
+**Convention**: any handler that depends on `delegatedKey.serializedBlob`
+to auto-sign must also consume `delegatedKey.state.status` before
+falling back — never treat `blob === null` alone as a terminal state.
+`YieldDepositHandler` currently waits indefinitely on the blob (no
+fallback timer) so it is unaffected; if a fallback is ever added there,
+apply the same gate.
+
+## 2026-04-24 — SignHandler auto-sign failure handling (DO NOT REINTRODUCE MANUAL FALLBACK)
+
+**Expected behavior of the sign flow in the Mini App.** This was hard-won;
+re-adding the "fall back to manual modal" behavior will break debuggability
+and trap users in an unrecoverable signature prompt. Read before touching
+`SignHandler.tsx`, `YieldDepositHandler.tsx`, or any new handler that
+consumes `delegatedKey.serializedBlob`.
+
+### The three request classes
+
+1. **`autoSign: true`** — backend emitted via `sign_calldata` because token
+   delegation is already sufficient (`sendCapability.ts:198-216`). The Mini
+   App is expected to execute silently via the delegated session key. The
+   user must not be asked to sign.
+2. **`autoSign: false`** — backend wants explicit user confirmation (e.g.
+   confirmation-phase sends, approvals, actions outside delegation scope).
+   `SigningRequestModal` is the correct UI and uses Privy's smart-wallet
+   client (`client.sendTransaction`).
+3. **`auth` / `approve`** — separate handlers; they drive `delegatedKey.start()`
+   themselves and are unaffected by the rules below.
+
+### Rule 1: auto-sign failures MUST NOT pop the manual modal
+
+Before 2026-04-24, both `createSessionKeyClient` and `sendTransaction`
+errors in the auto-sign path called `setShowManual(true)`. This was wrong
+for three compounding reasons:
+
+- **Manual sign cannot recover.** Same smart account, same chain, same
+  paymaster config. If the session-key UserOp fails with `AA21` / paymaster
+  404 / insufficient prefund, the Privy-EOA UserOp will fail the same way.
+- **It hid the real error.** `autoSignError` was set but only rendered as a
+  tiny banner above the modal — behind Telegram's modal chrome on some
+  clients. Users (and agents) saw "please sign" and assumed the key was
+  broken, not the paymaster.
+- **Approving the manual modal actually submitted the same doomed UserOp**
+  (via `client.sendTransaction`), producing a second viem error dump and
+  masking the original failure in the logs.
+
+**Current behavior** (`SignHandler.tsx` — the `autoSignError && currentRequest.autoSign`
+branch): on auto-sign failure render a full-screen error view with
+- the raw error text (selectable, scrollable, copy button),
+- diagnostics (`bundler: set|MISSING`, `paymaster: set|MISSING`, `to`,
+  `value`, `dataLen`),
+- a Close button that rejects the request and closes the web-app only on
+  explicit tap.
+
+**Do not** re-wire auto-sign errors into `SigningRequestModal`. If you
+need richer error handling, extend the error view — don't swap it for a
+modal.
+
+### Rule 2: `SigningRequestModal` is only for `autoSign: false`
+
+The modal's `approve` handler uses `useSmartWallets().client.sendTransaction`,
+which submits via Privy's embedded-wallet flow and **does not attach our
+ZeroDev paymaster**. It is fine for user-confirmed flows where the user
+accepts gas semantics, but it is never a valid fallback for an auto-sign
+path that expects paymaster sponsorship.
+
+If you add a new sign-like handler, mirror this split:
+- `autoSign: true` → session-key client from `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)`.
+- `autoSign: false` → Privy smart-wallet client via `useSmartWallets()`.
+
+### Rule 3: ZeroDev v3 — bundler URL == paymaster URL
+
+`VITE_ZERODEV_RPC` and `VITE_PAYMASTER_URL` must be the **same endpoint**:
+`https://rpc.zerodev.app/api/v3/<PROJECT_ID>/chain/<CHAIN_ID>`. The
+JSON-RPC method name (`eth_sendUserOperation` vs `pm_getPaymasterStubData`)
+is what routes bundler vs paymaster on ZeroDev's side.
+
+Do not invent a `/paymaster/` path segment. A previous `.env` had
+`https://rpc.zerodev.app/api/v3/paymaster/<PROJECT>/chain/<CHAIN>`, which
+404s with `Cannot POST /api/v3/paymaster/.../chain/...`. If
+`pm_getPaymasterStubData` returns 404 HTML, the URL is malformed — not the
+paymaster project.
+
+(Legacy v2 paymasters use a different URL shape: `https://rpc.zerodev.app/api/v2/paymaster/<PROJECT>`.
+We are on v3; don't mix.)
+
+### Rule 4: `autoSignError` state must stay surfaced
+
+- Never `setAutoSignError(null)` as part of a "retry" flow without also
+  clearing `autoSignAttemptedRef.current`.
+- Never render `autoSignError` only as a toast/banner. It must be part of a
+  view the user can read and copy — Telegram webviews clip overlay banners.
+- Log every failure with the `[AEGIS:SignHandler]` prefix so
+  `useDebugEntries` captures it.
+
+### Rule 5: `serializedBlob === null` is not a terminal state
+
+Pair it with `delegatedKey.state.status`:
+- `processing` → wait indefinitely (unlock in flight).
+- `idle` / `error` with no blob → genuine "no key"; arming the 10s fallback
+  is acceptable.
+- `done` with a blob → execute.
+
+See the 2026-04-24 race-fix entry above. Any new auto-sign handler must
+take `keyStatus` as a prop from `App.tsx`.
+
+### Checklist before shipping a new sign-capable handler
+
+- [ ] `autoSign: true` path uses `createSessionKeyClient` with both
+      `ZERODEV_RPC` and `PAYMASTER_URL`.
+- [ ] Auto-sign errors render a persistent error view, not a modal.
+- [ ] `autoSign: false` path uses `SigningRequestModal`.
+- [ ] Handler consumes `keyStatus` and waits on `processing`.
+- [ ] Debug logs use `[AEGIS:<HandlerName>]` prefix.
+- [ ] No hardcoded chain object / RPC in the handler — pull from
+      `crypto.ts` / env (and lift to a FE `chainConfig` when we add
+      multi-chain, per root CLAUDE.md).

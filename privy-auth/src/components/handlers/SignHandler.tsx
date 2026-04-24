@@ -8,9 +8,13 @@ import { SigningRequestModal } from '../SigningRequestModal';
 import { FullScreen } from '../atomics/FullScreen';
 import { Spinner } from '../atomics/spinner';
 import { ShieldIcon } from '../atomics/icons';
+import type { DelegationState } from '../../hooks/useDelegatedKey';
 
 const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
 const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
+// Fallback timeout only starts once the delegated key is no longer being restored.
+// While unlock() is in-flight we wait indefinitely — the timer is for the case
+// where the blob is genuinely unavailable (no stored key, decrypt failed, etc.).
 const AUTO_SIGN_TIMEOUT_MS = 10_000;
 const CLOSE_DELAY_MS = 1500;
 
@@ -21,11 +25,13 @@ export function SignHandler({
   privyToken,
   backendUrl,
   serializedBlob,
+  keyStatus,
 }: {
   request: SignRequest;
   privyToken: string;
   backendUrl: string;
   serializedBlob: string | null;
+  keyStatus: DelegationState['status'];
 }) {
   const { client } = useSmartWallets();
   const [currentRequest, setCurrentRequest] = React.useState<SignRequest>(initialRequest);
@@ -74,9 +80,13 @@ export function SignHandler({
     if (!currentRequest.autoSign || autoSignAttemptedRef.current) return;
 
     if (!serializedBlob) {
+      // Don't race the unlock: while the key is still being restored, just wait.
+      // Only arm the fallback once the key machine has settled without a blob
+      // (idle = no stored key / error = decrypt failed / done-without-blob = unexpected).
+      if (keyStatus === 'processing') return;
       const timer = setTimeout(() => {
         if (autoSignAttemptedRef.current) return;
-        console.warn('[SignHandler] serializedBlob timed out — falling back to manual');
+        console.warn('[SignHandler] serializedBlob timed out — falling back to manual', { keyStatus });
         setShowManual(true);
       }, AUTO_SIGN_TIMEOUT_MS);
       return () => clearTimeout(timer);
@@ -111,7 +121,6 @@ export function SignHandler({
           console.warn('[AEGIS:SignHandler] createSessionKeyClient failed:', msg);
           if (err instanceof Error && err.stack) console.warn('[AEGIS:SignHandler] stack:', err.stack);
           setAutoSignError(`createSessionKeyClient: ${msg}`);
-          setShowManual(true);
           return;
         }
       }
@@ -148,10 +157,9 @@ export function SignHandler({
         console.warn('[AEGIS:SignHandler] sendTransaction failed:', msg);
         if (err instanceof Error && err.stack) console.warn('[AEGIS:SignHandler] stack:', err.stack);
         setAutoSignError(`sendTransaction: ${msg}`);
-        setShowManual(true);
       }
     })();
-  }, [currentRequest, serializedBlob, reportTxHash, backendUrl, privyToken]);
+  }, [currentRequest, serializedBlob, keyStatus, reportTxHash, backendUrl, privyToken]);
 
   if (done) {
     return (
@@ -159,6 +167,61 @@ export function SignHandler({
         <div className="flex flex-col items-center gap-4">
           <div className="text-5xl">✅</div>
           <p className="text-white font-semibold">Transaction sent</p>
+        </div>
+      </FullScreen>
+    );
+  }
+
+  // Auto-sign failures are shown as a persistent, readable screen instead of
+  // the manual modal. Manual sign for an autoSign request is not a valid
+  // recovery (same account, usually the same class of failure like AA21), and
+  // swapping the view to a modal hides the error text behind TG UI chrome.
+  if (autoSignError && currentRequest.autoSign) {
+    const copy = () => {
+      navigator.clipboard?.writeText(autoSignError).catch(() => {});
+    };
+    return (
+      <FullScreen>
+        <div className="flex flex-col gap-4 max-w-md w-full">
+          <div className="flex flex-col items-center gap-2">
+            <div className="text-4xl">⚠️</div>
+            <p className="text-white font-semibold text-lg">Auto-sign failed</p>
+            <p className="text-xs text-white/50 text-center">
+              The delegated key could not execute this transaction.
+            </p>
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-left">
+            <p className="text-[10px] font-semibold tracking-widest text-white/30 uppercase mb-1">
+              Error
+            </p>
+            <p className="text-xs text-red-200 break-all whitespace-pre-wrap select-text max-h-64 overflow-auto">
+              {autoSignError}
+            </p>
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-left text-xs text-white/60 space-y-1">
+            <div>bundler: {ZERODEV_RPC ? 'set' : 'MISSING'}</div>
+            <div>paymaster: {PAYMASTER_URL ? 'set' : 'MISSING'}</div>
+            <div>to: <span className="break-all">{currentRequest.to}</span></div>
+            <div>value: {currentRequest.value}</div>
+            <div>dataLen: {currentRequest.data.length}</div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              className="flex-1 text-xs py-2 rounded border border-white/20 text-white/80 active:bg-white/10"
+              onClick={copy}
+            >
+              Copy error
+            </button>
+            <button
+              className="flex-1 text-xs py-2 rounded border border-white/20 text-white/80 active:bg-white/10"
+              onClick={() => {
+                sendReject();
+                window.Telegram?.WebApp?.close();
+              }}
+            >
+              Close
+            </button>
+          </div>
         </div>
       </FullScreen>
     );
