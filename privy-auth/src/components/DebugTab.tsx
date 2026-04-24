@@ -1,9 +1,21 @@
 import React from 'react';
 import { useDebugEntries } from '../hooks/useDebugEntries';
+import { setLogLevel, getLogLevel } from '../utils/logger';
+
+type Level = 'debug' | 'info' | 'warn' | 'error';
+const LEVELS: Level[] = ['debug', 'info', 'warn', 'error'];
+
+const LEVEL_COLORS: Record<string, string> = {
+  error: 'text-red-400',
+  warn:  'text-yellow-400',
+  info:  'text-blue-300',
+  log:   'text-white/70',
+};
 
 export function DebugTab() {
   const { entries } = useDebugEntries();
   const [copied, setCopied] = React.useState(false);
+  const [logLevel, setLevel] = React.useState<Level>(getLogLevel);
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -17,9 +29,14 @@ export function DebugTab() {
     setTimeout(() => setCopied(false), 2500);
   };
 
+  const changeLevel = (l: Level) => {
+    setLogLevel(l);
+    setLevel(l);
+  };
+
   return (
     <div className="flex flex-col px-4 pt-10 pb-28">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-[10px] font-semibold tracking-widest text-white/30 uppercase">Console</p>
           <p className="text-[10px] text-white/20 mt-0.5">{entries.length} entries</p>
@@ -36,13 +53,29 @@ export function DebugTab() {
         </button>
       </div>
 
+      <div className="flex gap-1 mb-3">
+        {LEVELS.map((l) => (
+          <button
+            key={l}
+            onClick={() => changeLevel(l)}
+            className={`flex-1 py-1 rounded text-[10px] font-semibold uppercase tracking-wider transition-all border ${
+              logLevel === l
+                ? 'bg-violet-600/30 border-violet-500/50 text-violet-300'
+                : 'bg-white/[0.03] border-white/10 text-white/30 hover:text-white/50'
+            }`}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+
       <div
         className="bg-black/60 border border-white/10 rounded-xl px-3 py-3 overflow-y-auto font-mono text-[10px] leading-relaxed"
-        style={{ minHeight: 'calc(100dvh - 220px)' }}
+        style={{ minHeight: 'calc(100dvh - 260px)' }}
       >
         {entries.length === 0 && <p className="text-white/20 text-center py-8">No logs yet…</p>}
         {entries.map((e, i) => (
-          <p key={i} className={`py-px ${e.level === 'warn' ? 'text-yellow-400' : 'text-white/70'}`}>
+          <p key={i} className={`py-px ${LEVEL_COLORS[e.level] ?? 'text-white/70'}`}>
             <span className="text-white/25 select-none">{e.ts} </span>{e.text}
           </p>
         ))}

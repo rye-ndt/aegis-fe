@@ -2,9 +2,12 @@ import React from 'react';
 import type { ApproveRequest } from '../../types/miniAppRequest.types';
 import type { DelegationState } from '../../hooks/useDelegatedKey';
 import { postResponse } from '../../utils/postResponse';
+import { toErrorMessage } from '../../utils/toErrorMessage';
 import { ApprovalOnboarding } from '../ApprovalOnboarding';
 import { FullScreenError, FullScreenLoading, FullScreenSuccess } from '../atomics/FullScreen';
+import { createLogger } from '../../utils/logger';
 
+const log = createLogger('ApproveHandler');
 const CLOSE_DELAY_MS = 1500;
 
 export function ApproveHandler({
@@ -63,6 +66,7 @@ function SessionKeyApproval({
     if (hasStartedRef.current) return;
     if (delegatedKeyState.status !== 'idle') return;
     hasStartedRef.current = true;
+    log.info('step', { step: 'started', requestId: request.requestId });
     startDelegatedKey();
   }, [delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -86,8 +90,13 @@ function SessionKeyApproval({
         grantedAt: record.grantedAt,
       },
     })
-      .then(() => setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS))
-      .catch((err) => console.warn('[ApproveHandler] postResponse failed:', err));
+      .then(() => {
+        log.info('step', { step: 'succeeded', requestId: request.requestId });
+        setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
+      })
+      .catch((err) => {
+        log.error('postResponse failed', { requestId: request.requestId, err: toErrorMessage(err) });
+      });
   }, [delegatedKeyState.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (delegatedKeyState.status === 'error') return <FullScreenError message={delegatedKeyState.message} />;

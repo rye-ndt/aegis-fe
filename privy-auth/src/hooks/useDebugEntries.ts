@@ -1,14 +1,16 @@
 import React from 'react';
 
-export type LogEntry = { level: 'log' | 'warn'; text: string; ts: string };
+export type LogEntry = { level: 'log' | 'warn' | 'error' | 'info'; text: string; ts: string };
 
 const entries: LogEntry[] = [];
 const listeners = new Set<() => void>();
 
-const _log = console.log.bind(console);
-const _warn = console.warn.bind(console);
+const _log   = console.log.bind(console);
+const _warn  = console.warn.bind(console);
+const _error = console.error.bind(console);
+const _info  = console.info.bind(console);
 
-function intercept(level: 'log' | 'warn', args: unknown[]) {
+function intercept(level: LogEntry['level'], args: unknown[]) {
   const text = args
     .map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a)))
     .join(' ');
@@ -19,8 +21,10 @@ function intercept(level: 'log' | 'warn', args: unknown[]) {
   listeners.forEach(fn => fn());
 }
 
-console.log = (...args: unknown[]) => { _log(...args); intercept('log', args); };
-console.warn = (...args: unknown[]) => { _warn(...args); intercept('warn', args); };
+console.log   = (...args: unknown[]) => { _log(...args);   intercept('log',   args); };
+console.warn  = (...args: unknown[]) => { _warn(...args);  intercept('warn',  args); };
+console.error = (...args: unknown[]) => { _error(...args); intercept('error', args); };
+console.info  = (...args: unknown[]) => { _info(...args);  intercept('info',  args); };
 
 export function useDebugEntries() {
   const [, forceUpdate] = React.useReducer(x => x + 1, 0);

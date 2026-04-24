@@ -3,6 +3,10 @@ import { useFundWallet, usePrivy } from '@privy-io/react-auth';
 import type { OnrampRequest } from '../../types/miniAppRequest.types';
 import { FullScreen } from '../atomics/FullScreen';
 import { Spinner } from '../atomics/spinner';
+import { createLogger } from '../../utils/logger';
+import { toErrorMessage } from '../../utils/toErrorMessage';
+
+const log = createLogger('OnrampHandler');
 
 export function OnrampHandler({ request }: { request: OnrampRequest }) {
   const { ready, authenticated } = usePrivy();
@@ -14,6 +18,7 @@ export function OnrampHandler({ request }: { request: OnrampRequest }) {
   const open = React.useCallback(async () => {
     setStatus('opening');
     setErrorMsg(null);
+    log.info('step', { step: 'started', requestId: request.requestId });
     try {
       await fundWallet({
         address: request.walletAddress,
@@ -23,10 +28,12 @@ export function OnrampHandler({ request }: { request: OnrampRequest }) {
           asset: request.asset === 'USDC' ? 'USDC' : 'native-currency',
         },
       });
+      log.info('step', { step: 'succeeded', requestId: request.requestId });
       setStatus('done');
     } catch (err) {
-      console.warn('[OnrampHandler] fundWallet failed:', err);
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      const msg = toErrorMessage(err);
+      log.error('fundWallet failed', { requestId: request.requestId, err: msg });
+      setErrorMsg(msg);
       setStatus('error');
     }
   }, [fundWallet, request]);

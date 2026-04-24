@@ -8,6 +8,9 @@ import { toErrorMessage } from '../../utils/toErrorMessage';
 import { FullScreen } from '../atomics/FullScreen';
 import { Spinner } from '../atomics/spinner';
 import { ShieldIcon } from '../atomics/icons';
+import { createLogger } from '../../utils/logger';
+
+const log = createLogger('YieldDepositHandler');
 
 const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
 const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
@@ -67,16 +70,17 @@ export function YieldDepositHandler({
         account: sc.account!,
         chain: null,
       });
-      console.log('[AEGIS:YieldDepositHandler] sendTransaction ok', { hash, mode });
+      log.info('step', { step: 'submitted', requestId: request.requestId, mode, hash });
       await reportTxHash(hash);
 
       // Check for queued follow-up step (defensive — yield doesn't chain today but safe to handle).
       try {
         await fetchNextRequest(backendUrl, request.requestId, privyToken);
       } catch (err) {
-        console.warn('[AEGIS:YieldDepositHandler] fetchNextRequest failed:', err);
+        log.warn('fetchNextRequest failed', { requestId: request.requestId, err: String(err) });
       }
 
+      log.info('step', { step: 'succeeded', requestId: request.requestId, mode });
       setPhase('done');
       setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
     },
@@ -90,10 +94,8 @@ export function YieldDepositHandler({
     if (!serializedBlob) return;
 
     autoSignAttemptedRef.current = true;
-    console.log('[AEGIS:YieldDepositHandler] autoSign start', {
-      requestId: request.requestId,
-      mode,
-    });
+    log.info('step', { step: 'started', requestId: request.requestId, mode });
+    log.debug('autoSign start', { requestId: request.requestId, mode });
 
     (async () => {
       try {
@@ -105,7 +107,7 @@ export function YieldDepositHandler({
         await executeSign(sc);
       } catch (err) {
         const msg = toErrorMessage(err);
-        console.warn('[AEGIS:YieldDepositHandler] autoSign failed:', msg);
+        log.error('autoSign failed', { requestId: request.requestId, mode, err: msg });
         setError(msg);
         setPhase('presign');
         autoSignAttemptedRef.current = false;
@@ -117,6 +119,7 @@ export function YieldDepositHandler({
     if (!client) return;
     setPhase('signing');
     setError(null);
+    log.info('step', { step: 'started', requestId: request.requestId, mode, path: 'manual' });
     try {
       const hash = await client.sendTransaction({
         to: request.to as `0x${string}`,
@@ -125,14 +128,17 @@ export function YieldDepositHandler({
         account: client.account!,
         chain: null,
       });
+      log.info('step', { step: 'succeeded', requestId: request.requestId, mode, hash, path: 'manual' });
       await reportTxHash(hash);
       setPhase('done');
       setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
     } catch (err) {
-      setError(toErrorMessage(err));
+      const msg = toErrorMessage(err);
+      log.error('manual sign failed', { requestId: request.requestId, mode, err: msg });
+      setError(msg);
       setPhase('presign');
     }
-  }, [client, request, reportTxHash]);
+  }, [client, request, reportTxHash, mode]);
 
   if (phase === 'done') {
     return (

@@ -1,5 +1,8 @@
 import React from 'react';
 import { usePrivy } from '@privy-io/react-auth';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('TelegramAutoLogin');
 
 /**
  * Silently authenticates the user via Telegram init data when the Mini App
@@ -39,12 +42,12 @@ export function TelegramAutoLogin() {
         const initDataRaw = launchParams.initDataRaw;
 
         if (!initDataRaw) {
-          console.warn('[TelegramAutoLogin] initDataRaw is empty — cannot authenticate');
+          log.warn('initDataRaw is empty — cannot authenticate');
           return;
         }
 
         if (typeof loginWithTelegram !== 'function') {
-          console.warn('[TelegramAutoLogin] loginWithTelegram not available on this Privy version');
+          log.warn('loginWithTelegram not available on this Privy version');
           return;
         }
 
@@ -52,11 +55,8 @@ export function TelegramAutoLogin() {
         // On success, Privy sets `authenticated = true`, which re-renders App
         // with ConnectedView — delegation flow picks up from there automatically.
       } catch (err) {
-        // Log only in development; never surface raw error to end user.
-        if (import.meta.env.DEV) {
-          console.warn('[TelegramAutoLogin] failed silently:', err);
-        }
         // Intentionally swallow — LoginView will still render for manual login.
+        log.warn('failed silently', { err: err instanceof Error ? err.message : String(err) });
       }
     })();
   // `loginWithTelegram` is included in deps so the lint rule is satisfied.

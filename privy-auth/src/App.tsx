@@ -1,4 +1,5 @@
 import React from 'react';
+import { Toaster } from 'sonner';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { useSmartWallets } from '@privy-io/react-auth/smart-wallets';
 import { useDelegatedKey } from './hooks/useDelegatedKey';
@@ -13,7 +14,9 @@ import { usePrivyToken } from './hooks/privy';
 import { LoadingSpinner } from './components/atomics/spinner';
 import { FullScreenError } from './components/atomics/FullScreen';
 import { LoginView } from './components/views/login';
+import { createLogger } from './utils/logger';
 
+const log = createLogger('App');
 const TMA_AUTO_LOGIN_TIMEOUT_MS = 4000;
 
 function isInsideTelegram() {
@@ -28,11 +31,17 @@ export default function App() {
   const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
   const [tmaLoginTimedOut, setTmaLoginTimedOut] = React.useState(false);
 
-  // Give TelegramAutoLogin a window to succeed before falling back to LoginView.
+  // Telegram detection + TMA timeout logging.
   React.useEffect(() => {
-    if (!isInsideTelegram()) return;
-    const t = setTimeout(() => setTmaLoginTimedOut(true), TMA_AUTO_LOGIN_TIMEOUT_MS);
-    return () => clearTimeout(t);
+    if (isInsideTelegram()) {
+      log.info('telegram-detected');
+      const t = setTimeout(() => {
+        log.info('tma-auto-login-timeout');
+        setTmaLoginTimedOut(true);
+      }, TMA_AUTO_LOGIN_TIMEOUT_MS);
+      return () => clearTimeout(t);
+    }
+    log.info('telegram-not-detected');
   }, []);
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
@@ -47,6 +56,11 @@ export default function App() {
   });
 
   const { requestId, request, loading: requestLoading, error: requestError } = useRequest(backendUrl);
+
+  // Log request load errors.
+  React.useEffect(() => {
+    if (requestError) log.error('request-load-failed', { error: requestError });
+  }, [requestError]);
 
   // Auto-unlock or auto-create the session keypair once logged in.
   // - Inside Telegram with no requestId → start() (create if missing).
@@ -68,17 +82,20 @@ export default function App() {
     }
   }, [authenticated, smartAddress, eoaAddress, delegatedKey.state.status, isAuthRequest, requestId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!ready) return <LoadingSpinner />;
+  let content: React.ReactNode;
 
-  if (!authenticated || !privyToken) {
-    if (isInsideTelegram() && !tmaLoginTimedOut) return <LoadingSpinner />;
-    return <LoginView />;
-  }
-
-  if (!requestId) {
+  if (!ready) {
+    content = <LoadingSpinner />;
+  } else if (!authenticated || !privyToken) {
+    if (isInsideTelegram() && !tmaLoginTimedOut) {
+      content = <LoadingSpinner />;
+    } else {
+      content = <LoginView />;
+    }
+  } else if (!requestId) {
     const delegatedAddress =
       delegatedKey.state.status === 'done' ? delegatedKey.state.record.address : null;
-    return (
+    content = (
       <StatusView
         eoaAddress={eoaAddress}
         smartAddress={smartAddress}
@@ -89,55 +106,70 @@ export default function App() {
         removeKey={delegatedKey.removeKey}
       />
     );
-  }
-
-  if (requestLoading) return <LoadingSpinner />;
-  if (requestError) return <FullScreenError message={requestError} showClose />;
-  if (!request) return <FullScreenError message="Unknown request type" showClose />;
-
-  switch (request.requestType) {
-    case 'auth':
-      return (
-        <AuthHandler
-          request={request}
-          privyToken={privyToken}
-          backendUrl={backendUrl}
-          delegatedKeyState={delegatedKey.state}
-          startDelegatedKey={delegatedKey.start}
-        />
-      );
-    case 'sign':
-      if (request.kind === 'yield_deposit' || request.kind === 'yield_withdraw') {
-        return (
-          <YieldDepositHandler
+  } else if (requestLoading) {
+    content = <LoadingSpinner />;
+  } else if (requestError) {
+    content = <FullScreenError message={requestError} showClose />;
+  } else if (!request) {
+    content = <FullScreenError message="Unknown request type" showClose />;
+  } else {
+    switch (request.requestType) {
+      case 'auth':
+        content = (
+          <AuthHandler
             request={request}
             privyToken={privyToken}
             backendUrl={backendUrl}
-            serializedBlob={delegatedKey.serializedBlob}
-            mode={request.kind === 'yield_deposit' ? 'deposit' : 'withdraw'}
+            delegatedKeyState={delegatedKey.state}
+            startDelegatedKey={delegatedKey.start}
           />
         );
+        break;
+      case 'sign': {
+        if (request.kind === 'yield_deposit' || request.kind === 'yield_withdraw') {
+          content = (
+            <YieldDepositHandler
+              request={request}
+              privyToken={privyToken}
+              backendUrl={backendUrl}
+              serializedBlob={delegatedKey.serializedBlob}
+              mode={request.kind === 'yield_deposit' ? 'deposit' : 'withdraw'}
+            />
+          );
+        } else {
+          content = (
+            <SignHandler
+              request={request}
+              privyToken={privyToken}
+              backendUrl={backendUrl}
+              serializedBlob={delegatedKey.serializedBlob}
+              keyStatus={delegatedKey.state.status}
+            />
+          );
+        }
+        break;
       }
-      return (
-        <SignHandler
-          request={request}
-          privyToken={privyToken}
-          backendUrl={backendUrl}
-          serializedBlob={delegatedKey.serializedBlob}
-          keyStatus={delegatedKey.state.status}
-        />
-      );
-    case 'approve':
-      return (
-        <ApproveHandler
-          request={request}
-          privyToken={privyToken}
-          backendUrl={backendUrl}
-          delegatedKeyState={delegatedKey.state}
-          startDelegatedKey={delegatedKey.start}
-        />
-      );
-    case 'onramp':
-      return <OnrampHandler request={request} />;
+      case 'approve':
+        content = (
+          <ApproveHandler
+            request={request}
+            privyToken={privyToken}
+            backendUrl={backendUrl}
+            delegatedKeyState={delegatedKey.state}
+            startDelegatedKey={delegatedKey.start}
+          />
+        );
+        break;
+      case 'onramp':
+        content = <OnrampHandler request={request} />;
+        break;
+    }
   }
+
+  return (
+    <>
+      <Toaster position="top-center" richColors closeButton theme="dark" />
+      {content}
+    </>
+  );
 }

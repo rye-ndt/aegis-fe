@@ -5,6 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_BACKEND_URL: string;
   readonly VITE_ZERODEV_RPC: string;
   readonly VITE_PAYMASTER_URL: string;
+  readonly VITE_LOG_LEVEL?: string;
 }
 
 interface ImportMeta {

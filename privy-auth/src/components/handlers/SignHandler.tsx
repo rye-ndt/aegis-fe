@@ -9,6 +9,9 @@ import { FullScreen } from '../atomics/FullScreen';
 import { Spinner } from '../atomics/spinner';
 import { ShieldIcon } from '../atomics/icons';
 import type { DelegationState } from '../../hooks/useDelegatedKey';
+import { createLogger } from '../../utils/logger';
+
+const log = createLogger('SignHandler');
 
 const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
 const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
@@ -86,24 +89,25 @@ export function SignHandler({
       if (keyStatus === 'processing') return;
       const timer = setTimeout(() => {
         if (autoSignAttemptedRef.current) return;
-        console.warn('[SignHandler] serializedBlob timed out — falling back to manual', { keyStatus });
+        log.warn('serializedBlob timed out — falling back to manual', { keyStatus });
         setShowManual(true);
       }, AUTO_SIGN_TIMEOUT_MS);
       return () => clearTimeout(timer);
     }
 
     autoSignAttemptedRef.current = true;
-    (async () => {
-      console.log('[AEGIS:SignHandler] autoSign start', {
-        requestId: currentRequest.requestId,
-        blobLen: serializedBlob.length,
-        hasRpc: !!ZERODEV_RPC,
-        hasPaymaster: !!PAYMASTER_URL,
-        to: currentRequest.to,
-        value: currentRequest.value,
-        dataLen: currentRequest.data.length,
-      });
+    log.info('step', { step: 'started', requestId: currentRequest.requestId });
+    log.debug('autoSign start', {
+      requestId: currentRequest.requestId,
+      blobLen: serializedBlob.length,
+      hasRpc: !!ZERODEV_RPC,
+      hasPaymaster: !!PAYMASTER_URL,
+      to: currentRequest.to,
+      value: currentRequest.value,
+      dataLen: currentRequest.data.length,
+    });
 
+    (async () => {
       let sessionClient = sessionClientRef.current;
       if (!sessionClient) {
         try {
@@ -113,13 +117,11 @@ export function SignHandler({
             PAYMASTER_URL || undefined,
           );
           sessionClientRef.current = sessionClient;
-          console.log('[AEGIS:SignHandler] session client built', {
-            account: sessionClient.account?.address,
-          });
+          log.debug('session client built', { account: sessionClient.account?.address });
         } catch (err) {
           const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-          console.warn('[AEGIS:SignHandler] createSessionKeyClient failed:', msg);
-          if (err instanceof Error && err.stack) console.warn('[AEGIS:SignHandler] stack:', err.stack);
+          log.error('createSessionKeyClient failed', { requestId: currentRequest.requestId, err: msg });
+          if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
           setAutoSignError(`createSessionKeyClient: ${msg}`);
           return;
         }
@@ -133,7 +135,7 @@ export function SignHandler({
           account: sessionClient.account!,
           chain: null,
         });
-        console.log('[AEGIS:SignHandler] sendTransaction ok', { hash });
+        log.info('step', { step: 'submitted', requestId: currentRequest.requestId, hash });
         await reportTxHash(hash);
 
         // Before closing, check if the backend has queued a next step.
@@ -141,21 +143,22 @@ export function SignHandler({
         try {
           nextRequest = await fetchNextRequest(backendUrl, currentRequest.requestId, privyToken);
         } catch (err) {
-          console.warn('[AEGIS:SignHandler] fetchNextRequest failed:', err);
+          log.warn('fetchNextRequest failed', { requestId: currentRequest.requestId, err: String(err) });
         }
 
         if (nextRequest && nextRequest.requestType === 'sign') {
-          console.log('[AEGIS:SignHandler] next swap step found', { requestId: nextRequest.requestId });
+          log.info('next swap step found', { requestId: nextRequest.requestId });
           autoSignAttemptedRef.current = false;
           setCurrentRequest(nextRequest as SignRequest);
         } else {
+          log.info('step', { step: 'succeeded', requestId: currentRequest.requestId });
           setDone(true);
           setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
         }
       } catch (err) {
         const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-        console.warn('[AEGIS:SignHandler] sendTransaction failed:', msg);
-        if (err instanceof Error && err.stack) console.warn('[AEGIS:SignHandler] stack:', err.stack);
+        log.error('sendTransaction failed', { requestId: currentRequest.requestId, err: msg });
+        if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
         setAutoSignError(`sendTransaction: ${msg}`);
       }
     })();
@@ -278,6 +281,7 @@ export function SignHandler({
       }}
       approve={async () => {
         if (!client) throw new Error('Smart wallet not ready');
+        log.info('step', { step: 'started', requestId: currentRequest.requestId, path: 'manual' });
         const hash = await client.sendTransaction({
           to: currentRequest.to as `0x${string}`,
           value: BigInt(currentRequest.value),
@@ -285,6 +289,7 @@ export function SignHandler({
           account: client.account!,
           chain: null,
         });
+        log.info('step', { step: 'succeeded', requestId: currentRequest.requestId, hash, path: 'manual' });
         await reportTxHash(hash);
         setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
       }}

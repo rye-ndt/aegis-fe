@@ -1,5 +1,25 @@
 # Privy Auth Mini-App — Status Log
 
+## Logging — 2026-04-25
+
+Added `sonner` toasts + runtime-toggled structured logger across all modules.
+
+**What**: Created `src/utils/logger.ts` (`createLogger`). Migrated all 34
+`console.*` call sites to use `createLogger(scope)`. Mounted `<Toaster>` in
+`App.tsx`. Extended `useDebugEntries` to intercept `console.error` and
+`console.info`. Added a 4-button level toggle (debug/info/warn/error) to
+`DebugTab`.
+
+**Why**: Errors and warnings were invisible when a modal covered DebugTab or
+when the first fetch failed before UI hydrated. The runtime level gate allows
+turning on `debug` on a single device without a rebuild.
+
+**New conventions**: see "Logging & Debug Conventions" section below.
+
+**Not done (out of scope)**: remote log shipping, JSON logs, build-time stripping.
+
+---
+
 ## Scaling — 2026-04-24
 
 ### Part 1: Resilient fetch (429/5xx backoff)
@@ -422,15 +442,64 @@ double-fires:
   `@ts-ignore` at the destructure is intentional until upstream types ship.
 
 ## Logging & Debug Conventions
-- Use the `loggedFetch(url, init)` wrapper for every backend call — it emits
-  `[API] → METHOD URL` / `[API] ← STATUS body` to the console so it shows up in
-  the Debug tab and copy-log flow.
-- `DebugLog.tsx` monkey-patches `console.log` / `console.warn` at module load
-  and captures only lines containing `[AEGIS:` into an in-memory ring buffer
-  (cap 200). **Non-`[AEGIS:` logs pass through untouched.** To surface a log
-  in the Debug tab, prefix with `[AEGIS:<namespace>]`.
-- Existing informal tags in the codebase: `[Delegation]`, `[SignHandler]`,
-  `[TelegramAutoLogin]`, `[ApproveHandler]`, `[API]`. Keep using these.
+
+### Logger (`src/utils/logger.ts`) — 2026-04-25
+
+Every module uses `createLogger(scope)`. Raw `console.*` calls are forbidden
+except in the early bootstrap of `main.tsx` if strictly needed.
+
+```ts
+import { createLogger } from '../utils/logger';
+const log = createLogger('MyModule');
+log.debug('cache-hit', { address });
+log.info('step', { step: 'started', requestId });
+log.warn('retries-exhausted', { attempts });
+log.error('send-failed', { err: msg });
+```
+
+**Toast policy**: only `warn` and `error` trigger sonner toasts. `debug` and
+`info` go to console + DebugTab buffer only.
+
+**Level gate**: runtime-switchable via `localStorage["aegis.logLevel"]`
+(`"debug" | "info" | "warn" | "error"`) or `window.__aegisLog("debug")` from
+the device's remote console / DebugTab. Persists across reloads.
+
+**Build-time default**: `VITE_LOG_LEVEL` env var (default `"info"`).
+
+| Var | Default | Purpose |
+|---|---|---|
+| `VITE_LOG_LEVEL` | `info` | Initial level baked at build time |
+
+**DebugTab filter**: `useDebugEntries` captures only lines containing `[AEGIS:`
+(load-bearing noise filter against Privy SDK chatter). The logger always
+produces `[AEGIS:scope]`-prefixed output, so every `createLogger` call is
+automatically captured.
+
+**Levels in DebugTab**: `log` (white), `info` (blue), `warn` (yellow),
+`error` (red). A 4-button level toggle in DebugTab calls `setLogLevel` at
+runtime.
+
+**Privacy**: never log `privyToken`, `initData`, `serializedBlob`, `privyDid`,
+or any signature material. Truncate (`token.slice(0,8)+'…'`) if you must
+reference a token.
+
+**Step logging convention for handlers**:
+```ts
+log.info('step', { step: 'started' | 'submitted' | 'succeeded' | 'failed', requestId });
+```
+
+### Sonner (`<Toaster>`)
+
+Mounted once in `App.tsx` (top-level JSX fragment) with
+`position="top-center" richColors closeButton theme="dark"`. All `log.warn` /
+`log.error` calls surface as toasts so errors are visible even when DebugTab
+is hidden by a modal or the first fetch fails before UI hydrates.
+
+### Legacy
+The informal `[Delegation]`, `[SignHandler]`, `[TelegramAutoLogin]`,
+`[ApproveHandler]`, `[API]` tags are replaced by the scoped logger. Do not
+add new raw `console.*` calls — use `createLogger` instead.
+
 - Dev-only UI (e.g. "Wipe CloudStorage" button in `ApprovalOnboarding`) is
   gated behind `import.meta.env.DEV`.
 

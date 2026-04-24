@@ -1,10 +1,13 @@
+import { createLogger } from './logger';
+
+const log = createLogger('loggedFetch');
+
 export async function loggedFetch(url: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
-  const body = init?.body;
-  if (body) {
-    console.log(`[API] → ${method} ${url}\n[API] body: ${body}`);
+  if (init?.body) {
+    log.debug(`→ ${method} ${url} body: ${init.body}`);
   } else {
-    console.log(`[API] → ${method} ${url}`);
+    log.debug(`→ ${method} ${url}`);
   }
 
   const r = await fetch(url, init);
@@ -13,9 +16,17 @@ export async function loggedFetch(url: string, init?: RequestInit): Promise<Resp
     const text = await r.clone().text();
     let display: string;
     try { display = JSON.stringify(JSON.parse(text)); } catch { display = text; }
-    console.log(`[API] ← ${r.status} ${display}`);
+    if (!r.ok) {
+      log.warn(`← ${r.status} ${display}`);
+    } else {
+      log.debug(`← ${r.status} ${display}`);
+    }
   } catch {
-    console.log(`[API] ← ${r.status}`);
+    if (!r.ok) {
+      log.warn(`← ${r.status}`);
+    } else {
+      log.debug(`← ${r.status}`);
+    }
   }
 
   return r;

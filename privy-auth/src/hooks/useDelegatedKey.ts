@@ -15,7 +15,9 @@ import {
   cloudStorageRemoveItem,
 } from '../utils/telegramStorage';
 import { toErrorMessage } from '../utils/toErrorMessage';
+import { createLogger } from '../utils/logger';
 
+const log = createLogger('useDelegatedKey');
 const STORAGE_KEY = 'delegated_key';
 
 // Placeholder — real per-token limits are enforced server-side via /delegation/grant.
@@ -115,10 +117,7 @@ export function useDelegatedKey(options: {
     dispatch({ type: 'PROCESSING', step: 'Generating session keypair…' });
     const keypair = generateKeypair();
     keypairRef.current = { privateKey: keypair.privateKey, address: keypair.address };
-    console.log('[Delegation] Generated keypair:', {
-      address: keypair.address,
-      publicKey: keypair.publicKey,
-    });
+    log.debug('keypair-derived', { address: keypair.address });
 
     if (!signerWallet) throw new Error('Privy embedded wallet not found');
     const rawProvider = await signerWallet.getEthereumProvider();
@@ -127,14 +126,21 @@ export function useDelegatedKey(options: {
     if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
 
     dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain…' });
-    const blob = await installSessionKey(
-      rawProvider as Parameters<typeof installSessionKey>[0],
-      signerAddress as `0x${string}`,
-      keypair.privateKey,
-      keypair.address,
-      zerodevRpc,
-    );
+    let blob: string;
+    try {
+      blob = await installSessionKey(
+        rawProvider as Parameters<typeof installSessionKey>[0],
+        signerAddress as `0x${string}`,
+        keypair.privateKey,
+        keypair.address,
+        zerodevRpc,
+      );
+    } catch (err) {
+      log.error('session-key-install-failed', { address: keypair.address, err: toErrorMessage(err) });
+      throw err;
+    }
     setSerializedBlob(blob);
+    log.info('session-key-installed', { address: keypair.address });
 
     dispatch({ type: 'PROCESSING', step: 'Storing session key…' });
     const payload = JSON.stringify({
@@ -144,10 +150,6 @@ export function useDelegatedKey(options: {
     });
     await cloudStorageSetItem(STORAGE_KEY, await encryptBlob(payload, privyDid));
 
-    console.log('[Delegation] Session key installed:', {
-      address: keypair.address,
-      publicKey: keypair.publicKey,
-    });
     dispatch({ type: 'DONE', record: buildRecord() });
   }, [signerWallet, signerAddress, privyDid, buildRecord]);
 
@@ -164,12 +166,12 @@ export function useDelegatedKey(options: {
           dispatch({ type: 'DONE', record: buildRecord() });
           return;
         }
-        console.warn('[Delegation] Auto-unlock: decryption failed — clearing stale key');
+        log.warn('auto-unlock: decryption failed — clearing stale key');
         await cloudStorageRemoveItem(STORAGE_KEY).catch(() => {});
         dispatch({ type: 'IDLE' });
       } catch (err) {
         dispatch({ type: 'IDLE' });
-        if (import.meta.env.DEV) console.warn('[Delegation] auto-unlock failed:', err);
+        log.warn('auto-unlock failed', { err: toErrorMessage(err) });
       }
     })();
   }, [smartAccountAddress, privyDid, tryRestore, buildRecord]);
@@ -184,10 +186,16 @@ export function useDelegatedKey(options: {
         const existing = await cloudStorageGetItem(STORAGE_KEY);
 
         if (existing && (await tryRestore(existing))) {
+          log.debug('choice', { choice: 'cache-hit' });
           dispatch({ type: 'DONE', record: buildRecord() });
           return;
         }
-        if (existing) console.warn('[Delegation] Decryption failed — regenerating keypair');
+        if (existing) {
+          log.warn('decryption failed — regenerating keypair');
+          log.debug('choice', { choice: 'regenerate' });
+        } else {
+          log.debug('choice', { choice: 'install' });
+        }
 
         await createAndStore();
       } catch (err) {
@@ -195,6 +203,7 @@ export function useDelegatedKey(options: {
           dispatch({ type: 'ERROR', message: 'You rejected the signing request — please try again.' });
           return;
         }
+        log.error('start-failed', { err: toErrorMessage(err) });
         dispatch({ type: 'ERROR', message: toErrorMessage(err) });
       }
     })();

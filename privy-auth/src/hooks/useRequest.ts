@@ -1,6 +1,9 @@
 import React from 'react';
 import type { MiniAppRequest } from '../types/miniAppRequest.types';
 import { loggedFetch } from '../utils/loggedFetch';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('useRequest');
 
 export function useRequest(backendUrl: string): {
   requestId: string | null;
@@ -19,6 +22,8 @@ export function useRequest(backendUrl: string): {
       return;
     }
 
+    log.debug('fetching request', { requestId });
+
     loggedFetch(`${backendUrl}/request/${requestId}`)
       .then((r) => {
         if (r.status === 404) throw new Error('Request not found or expired');
@@ -27,12 +32,15 @@ export function useRequest(backendUrl: string): {
         return r.json() as Promise<MiniAppRequest>;
       })
       .then((data) => {
+        log.info('request-received', { requestId: data.requestId, type: data.requestType });
         setRequest(data);
         setLoading(false);
       })
       .catch((err: unknown) => {
         const isNetworkError = err instanceof TypeError;
-        setError(isNetworkError ? 'Could not reach server' : (err instanceof Error ? err.message : String(err)));
+        const msg = isNetworkError ? 'Could not reach server' : (err instanceof Error ? err.message : String(err));
+        log.error('request-load-failed', { requestId, err: msg });
+        setError(msg);
         setLoading(false);
       });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

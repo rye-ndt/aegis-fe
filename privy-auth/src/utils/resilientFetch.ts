@@ -1,4 +1,7 @@
 import { loggedFetch } from './loggedFetch';
+import { createLogger } from './logger';
+
+const log = createLogger('resilientFetch');
 
 export interface ResilientFetchOptions extends RequestInit {
   maxAttempts?: number;
@@ -55,17 +58,20 @@ export async function resilientFetch(
           : Math.min(jitter(baseDelayMs * 2 ** attempt), maxDelayMs);
 
       if (attempt >= maxAttempts - 1) {
-        // Out of retries — return the last response for the caller to handle.
+        log.warn('retries exhausted', { attempts: maxAttempts, lastStatus: response.status });
         return response;
       }
-      console.warn(`[API] retry ${attempt + 1}/${maxAttempts} in ${delay}ms (status=${response.status})`);
+      log.debug(`retry ${attempt + 1}/${maxAttempts} in ${delay}ms`, { attempt, status: response.status, willRetry: true });
       await sleep(delay);
     } catch (err) {
       // Network error — retry unless we're at the last attempt.
       lastErr = err;
-      if (attempt >= maxAttempts - 1) throw err;
+      if (attempt >= maxAttempts - 1) {
+        log.warn('retries exhausted (network error)', { attempts: maxAttempts });
+        throw err;
+      }
       const delay = Math.min(jitter(baseDelayMs * 2 ** attempt), maxDelayMs);
-      console.warn(`[API] retry ${attempt + 1}/${maxAttempts} in ${delay}ms (network error)`);
+      log.debug(`retry ${attempt + 1}/${maxAttempts} in ${delay}ms (network error)`, { attempt, willRetry: true });
       await sleep(delay);
     }
   }

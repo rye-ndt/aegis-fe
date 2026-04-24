@@ -1,5 +1,8 @@
 import React from 'react';
 import { resilientFetch } from '../utils/resilientFetch';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('useFetch');
 
 export function useFetch<T>(
   url: string | null,
@@ -20,6 +23,7 @@ export function useFetch<T>(
     let cancelled = false;
     setLoading(true);
     setError(null);
+    log.debug('fetching', { url });
 
     resilientFetch(url, { headers })
       .then((r) => {
@@ -30,8 +34,11 @@ export function useFetch<T>(
         if (cancelled) return;
         setData(transform ? transform(body) : (body as T));
       })
-      .catch(() => {
-        if (!cancelled) setError(errorMessage);
+      .catch((err) => {
+        if (!cancelled) {
+          log.error(errorMessage, { url, err: err instanceof Error ? err.message : String(err) });
+          setError(errorMessage);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
