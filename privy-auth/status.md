@@ -1,5 +1,44 @@
 # Privy Auth Mini-App — Status Log
 
+## /swap — 2026-04-24
+
+SignHandler now supports multi-step swaps by fetching the next queued
+`SignRequest` for the authenticated user after a successful autoSign
+response, before calling `Telegram.WebApp.close()`.
+
+**Endpoint contract.** `GET /request/:id?after=<prev>` requires
+`Authorization: Bearer <privyToken>` and returns the next pending
+`SignRequest` for that user. The backend indexes pending sign requests
+per user in a Redis ZSET (`user_pending_signs:<userId>`), so the lookup
+is O(log n), not a cache scan. FE calls it with a fixed-interval retry
+(6 × 400ms) because the backend creates step N+1 shortly after the FE
+posts step N's response (the capability's waitFor has to tick first).
+
+**Implementation shape.**
+- `utils/fetchNextRequest.ts` — plain async function (not a hook, so
+  moved out of `hooks/`). Passes privyToken as `Authorization: Bearer`,
+  retries 404s with fixed 400ms backoff, treats 410 as terminal-empty.
+- `SignHandler`:
+  - Session client (`createSessionKeyClient`) cached in a `useRef`
+    across steps — avoids ~200–400ms init per step.
+  - `currentRequest` state resyncs when the parent passes a new
+    `initialRequest.requestId` — keeps the component correct if the
+    dispatcher routes a different request mid-session.
+  - On any autoSign failure (key build or send), falls back to the
+    manual `SigningRequestModal` with an inline error banner. Reject
+    path remains wired; success paths use a 1.5s close delay per the
+    global TMA close convention.
+
+**Convention introduced:** a mini-app handler MAY keep the WebApp window
+open across multiple same-type requests when the backend signals a
+continuation. The default remains close-after-one. Only SignHandler
+participates today; other handlers retain their close-on-success
+behaviour.
+
+**Do not add `fetchNextRequest` back to `hooks/`.** The `hooks/` directory
+is for React hooks only (functions beginning with `use*`). Utility
+functions go under `utils/`.
+
 ## Onramp — 2026-04-23
 
 Added `requestType: 'onramp'` handled by `components/handlers/OnrampHandler.tsx`.
@@ -64,7 +103,7 @@ src/
 │       └── login.tsx              # Full-screen login prompt
 ├── hooks/
 │   ├── privy.ts                   # usePrivyToken — caches getAccessToken()
-│   ├── useRequest.ts              # Reads ?requestId=… and fetches /request/:id
+│   ├── useRequest.ts              # Reads ?requestId=… and fetches /request/:id; exports fetchNextRequest
 │   ├── useFetch.ts                # Generic authed-GET hook (used by StatusView tabs)
 │   ├── useDebugEntries.ts         # Global console.log/warn interceptor + hook
 │   └── useDelegatedKey.ts         # Session-keypair state machine (start/unlock/remove)
@@ -132,7 +171,7 @@ Session-key auto-bootstrap (after auth, before dispatch):
 TMA ↔ backend protocol. Every handler and response posts flow through this file.
 
 ```ts
-RequestType    = 'auth' | 'sign' | 'approve'
+RequestType    = 'auth' | 'sign' | 'approve' | 'onramp'
 ApproveSubtype = 'session_key' | 'aegis_guard'
 ```
 
@@ -141,6 +180,7 @@ ApproveSubtype = 'session_key' | 'aegis_guard'
   autoSign }`
 - `ApproveRequest` → `{ subtype, suggestedTokens?, reapproval?, tokenAddress?,
   amountRaw? }`
+- `OnrampRequest` → `{ amount, asset: 'USDC', chainId, walletAddress }`
 
 Responses go to `POST {backendUrl}/response` via `postResponse()`; the response
 shape mirrors the request type (`AuthResponse`, `SignResponse`,
@@ -151,6 +191,7 @@ shape mirrors the request type (`AuthResponse`, `SignResponse`,
 | Method & Path | Used by |
 | -------- | ------- |
 | `GET  /request/:requestId`              | `useRequest` |
+| `GET  /request/:requestId?after=<id>`   | `fetchNextRequest` — returns next queued step or 404 |
 | `POST /response`                         | `postResponse` |
 | `GET  /portfolio`                        | `StatusView` (home tab) |
 | `GET  /delegation/grant`                 | `StatusView` (configs tab permissions list) |
@@ -177,9 +218,16 @@ double-fires:
    all success states close the TMA this way).
 
 ### `SignHandler`
+- Uses internal `currentRequest` state (initialised from the `request` prop) so
+  the handler can advance through swap steps without unmounting.
 - `autoSign === true`: await `serializedBlob`, build a ZeroDev session client
-  with `createSessionKeyClient`, `sendTransaction({ chain: null })`, POST
-  `{ txHash }`, close TMA. Fallback: 10 s timer → show manual modal.
+  with `createSessionKeyClient` (cached in `sessionClientRef` across steps —
+  avoids the ~200–400 ms re-init per step), `sendTransaction({ chain: null })`,
+  POST `{ txHash }`. After success, call `fetchNextRequest(backendUrl,
+  currentRequest.requestId)`. If a next `SignRequest` comes back, reset
+  `autoSignAttemptedRef` and `setCurrentRequest(next)` — the effect re-fires
+  for the new step. On 404, close the TMA.
+- Fallback to manual: 10 s timer fires if `serializedBlob` never arrives.
 - Manual path: render `<SigningRequestModal />`. The modal's `approve` uses
   `useSmartWallets().client` (owner EOA, *not* the session key) to send the tx.
 - Reject path always POSTs `{ rejected: true }` and calls `.close()`.
@@ -327,8 +375,9 @@ double-fires:
   fetches once on `authenticated` flip; long-lived sessions may see stale
   tokens. Re-mount or call `getAccessToken()` if a 401 bounces back.
 - `useRequest` reads `requestId` from `window.location.search` at mount and
-  does **not** re-run on URL changes — the TMA lifecycle is one request per
-  open.
+  does **not** re-run on URL changes. For chained swap steps, `SignHandler`
+  uses `fetchNextRequest` directly rather than re-invoking the hook — the URL
+  `requestId` stays fixed for the lifetime of the WebApp open.
 - `SmartWalletsProvider` must wrap `App` (and `TelegramAutoLogin`, which
   happens to sit outside but doesn't use smart wallets) — `useSmartWallets()`
   throws otherwise.
