@@ -1,8 +1,8 @@
 import type { MiniAppResponse } from '../types/miniAppRequest.types';
-import { loggedFetch } from './loggedFetch';
+import { resilientFetch } from './resilientFetch';
 
 export async function postResponse(backendUrl: string, response: MiniAppResponse): Promise<unknown> {
-  const r = await loggedFetch(`${backendUrl}/response`, {
+  const r = await resilientFetch(`${backendUrl}/response`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

@@ -1,5 +1,41 @@
 # Privy Auth Mini-App — Status Log
 
+## Scaling — 2026-04-24
+
+### Part 1: Resilient fetch (429/5xx backoff)
+
+All FE fetch helpers now route through `resilientFetch` (`src/utils/resilientFetch.ts`):
+- Retries 429/502/503/504 up to 4 times with jittered exponential backoff (base 250ms, max 2s).
+- Honors `Retry-After` header when present on 429/503.
+- Returns the last response after exhausting retries; 401/404/410 pass through immediately (not retried).
+- `loggedFetch` stays as the raw per-attempt request logger — `resilientFetch` composes on top of it.
+
+Call sites updated: `postResponse.ts`, `fetchNextRequest.ts`, `useFetch.ts`.
+
+`fetchNextRequest` keeps its outer 404-retry loop (6 × 400ms) — that loop waits for the backend to
+finish creating the next pending request. The `resilientFetch` inner loop handles transport errors.
+Do not collapse these two loops; they have different jobs.
+
+`toErrorMessage.ts` now returns `'Service is busy. Try again in a moment.'` when the status string is
+`429` or `503`, so users see a recoverable-sounding message if retries exhaust.
+
+### Part 2: Stateless-routing invariant
+
+The mini-app must not assume sticky routing to a single backend replica. Verified by grep
+on 2026-04-24 — zero hits for cookies, `credentials: 'include'`, Set-Cookie consumption,
+or server-issued opaque handles in client state.
+
+Every request is self-authenticating: `Authorization: Bearer <privyToken>` is attached by
+`postResponse.ts`, `fetchNextRequest.ts`, and every `useFetch` call site. All server-issued
+handles (`requestId`) are Redis-backed on the BE (`mini_app_req:{id}`,
+`pending_collection:{channelId}`) and resolve on any replica.
+
+Violations must be explicitly opted out with `// STATELESS-AUDIT: allowed because <reason>`
+in source, accompanied by backend-side sticky-routing configuration.
+
+No test runner is set up in this project; the static regression guard (Part 2, Step 2.1) is
+deferred until vitest or similar is added.
+
 ## Yield Optimization — 2026-04-24
 
 Two new `SignRequest.kind` values, a `YieldDepositHandler`, and a `YieldPositions` component.

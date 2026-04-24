@@ -1,8 +1,8 @@
 import type { MiniAppRequest } from '../types/miniAppRequest.types';
-import { loggedFetch } from './loggedFetch';
+import { resilientFetch } from './resilientFetch';
 
-const MAX_ATTEMPTS = 6;
-const RETRY_DELAY_MS = 400;
+const NEXT_REQUEST_MAX_ATTEMPTS = 6;
+const NEXT_REQUEST_RETRY_DELAY_MS = 400;
 
 /**
  * Fetch the next queued mini-app request for the authenticated user after
@@ -12,6 +12,10 @@ const RETRY_DELAY_MS = 400;
  * The backend creates the next step ~500ms after the FE posts its SignResponse
  * (the capability's waitFor poll has to tick first), so we retry with
  * fixed-interval backoff before treating the queue as empty.
+ *
+ * Two retry loops with distinct jobs:
+ * - resilientFetch inner loop: handle 429/5xx/network errors.
+ * - Outer 404 loop: wait for the backend to finish creating the next request.
  */
 export async function fetchNextRequest(
   backendUrl: string,
@@ -19,13 +23,13 @@ export async function fetchNextRequest(
   privyToken: string,
 ): Promise<MiniAppRequest | null> {
   const url = `${backendUrl}/request/${afterRequestId}?after=${afterRequestId}`;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const r = await loggedFetch(url, {
+  for (let attempt = 0; attempt < NEXT_REQUEST_MAX_ATTEMPTS; attempt++) {
+    const r = await resilientFetch(url, {
       headers: { Authorization: `Bearer ${privyToken}` },
     });
     if (r.status === 404) {
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(RETRY_DELAY_MS);
+      if (attempt < NEXT_REQUEST_MAX_ATTEMPTS - 1) {
+        await sleep(NEXT_REQUEST_RETRY_DELAY_MS);
         continue;
       }
       return null;

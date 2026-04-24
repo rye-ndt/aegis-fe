@@ -1,4 +1,5 @@
 import React from 'react';
+import { resilientFetch } from '../utils/resilientFetch';
 
 export function useFetch<T>(
   url: string | null,
@@ -20,7 +21,7 @@ export function useFetch<T>(
     setLoading(true);
     setError(null);
 
-    fetch(url, { headers })
+    resilientFetch(url, { headers })
       .then((r) => {
         if (!r.ok) throw new Error(String(r.status));
         return r.json() as Promise<unknown>;
