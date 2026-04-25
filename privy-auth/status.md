@@ -1,5 +1,42 @@
 # Privy Auth Mini-App — Status Log
 
+## Points tab — 2026-04-25
+
+Added a read-only **Points** tab surfacing loyalty balance, recent ledger activity, and the top-10 leaderboard. Initial implementation was reviewed and patched in the same day (see "Review fixes" below) before merge.
+
+**What**:
+- `src/components/StatusView.tsx` — `Tab` union extended to `'home' | 'points' | 'configs' | 'debug'`; `PointsIcon` (star polygon SVG) added; `TABS` array updated with the Points entry between Home and Config; render branch added.
+- `src/hooks/useAppData.tsx` — `AppData` context now includes `backendUrl` and `privyToken`; `useAppConfig()` selector exported so hooks outside the provider can read config without threading props.
+- `src/hooks/useLoyalty.ts` — three fetch hooks: `useLoyaltyBalance`, `useLoyaltyHistory` (cursor-based pagination + `loadMore()` + `hasMore`), `useLoyaltyLeaderboard`. Internal `useResilientGet` helper consolidates the get-with-cancellation-and-tick pattern (balance + leaderboard); history keeps a custom effect because it needs pagination + reset on visibility. Balance refetches on tab `visibilitychange`; history resets to page 0 on visibility. Leaderboard call intentionally omits `Authorization` header (public endpoint). `pointsTotal` is kept as an opaque string throughout — never passed through `Number()`. Each hook returns an explicit `unauthorized` flag so the UI can distinguish 401 from transient 5xx/network errors.
+- `src/components/PointsTab.tsx` — three stacked sections: balance card (large points number, season label, rank pill), recent activity list with skeleton shimmer, leaderboard. **Only** a real 401 (via `unauthorized` flag) collapses balance + history to leaderboard-only; transient errors render an inline message. Zero-points + empty history shows "No points yet" empty state.
+
+**Why**: hooks fetch fresh on mount/focus rather than going through `AppDataProvider` — loyalty data doesn't need to survive tab switches and avoids stale cache when points are awarded mid-session (no realtime push in v1).
+
+**Wire contract** (must match the BE `loyalty-program-plan.md` PR 2):
+- `GET /loyalty/balance` → `{ seasonId: string, pointsTotal: string, rank: number | null }`. `pointsTotal` is a bigint serialized as string.
+- `GET /loyalty/history?limit=&cursorCreatedAtEpoch=` → `{ entries: { actionType: string, points: string, createdAtEpoch: number }[], nextCursor: number | null }`. `createdAtEpoch` is **seconds**, matching the BE `newCurrentUTCEpoch()` convention. `nextCursor` is the `createdAtEpoch` of the last returned row (or null if no more).
+- `GET /loyalty/leaderboard?limit=` → `{ seasonId: string, entries: { rank: number, pointsTotal: string }[] }`. No `userId` exposed (privacy).
+- `actionType` must be one of the seven canonical BE action types: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `yield_deposit`, `yield_hold_day`, `referral`, `manual_adjust`. Unknown ids render as raw strings.
+
+**New conventions**:
+- Action label map lives at the top of `PointsTab.tsx` as `ACTION_LABELS: Record<string, string>`, keyed by the BE `actionType` ids above. Adding a new BE action type requires adding a label here, otherwise the raw id is shown — acceptable v1 behaviour.
+- `useAppConfig()` is the canonical way for hooks to access `backendUrl` + `privyToken` from context without threading props. Follows the same pattern as `usePortfolio` / `useDelegations` / `useYieldPositions`.
+- Timestamps from the BE are always **epoch seconds** (`newCurrentUTCEpoch()`), never milliseconds. Frontend helpers like `relativeTime(epochSeconds)` operate on seconds directly.
+- For paginated list hooks, expose `hasMore: boolean` (derived from `cursor != null`) rather than asking the UI to compare `data.length` against a page size — the latter breaks once any short page comes back.
+
+### Review fixes (same-day, 2026-04-25)
+
+The first cut was reviewed and the following were corrected before merge:
+
+1. **`relativeTime` was treating BE epochs as milliseconds** — would have rendered every entry as "~600000d ago". Now operates on seconds, matching `newCurrentUTCEpoch()`.
+2. **`is401` was triggering on any error** (transient 500 / network) — would silently collapse the user-scoped sections to leaderboard-only with no explanation. Replaced with an explicit `unauthorized: boolean` returned from each hook; only true 401s collapse.
+3. **`loadMore` button was gated on `data.length >= limit`** — stayed visible forever after a short final page and clicks were silent no-ops. Now gated on `hasMore = cursor != null`.
+4. **Wire shape was invented and didn't match the BE plan** — fields renamed to BE-aligned `actionType` / `points` / `createdAtEpoch`; cursor query param renamed to `cursorCreatedAtEpoch`; `ACTION_LABELS` keys updated to the seven canonical BE action types. (The previous keys — `swap`, `send`, `deposit`, `yield_withdraw`, `onramp` — were not in the BE plan and would have caused all award labels to fall back to raw ids.)
+5. **Two unused `eslint-disable react-hooks/exhaustive-deps` directives removed** from `useLoyalty.ts`.
+6. **Refactored to a shared `useResilientGet` helper** to consolidate the cancel-tick-visibility pattern across balance + leaderboard. History stays custom because pagination + reset don't fit the helper's shape.
+
+**Cross-cutting risk noted**: adding `backendUrl` + `privyToken` to the `AppData` context value means consumers of `usePortfolio` / `useDelegations` / `useYieldPositions` will re-render if the token rotates mid-session. In practice the token is stable for the lifetime of a Privy session, so this is benign — flagged here for the next time the auth flow is touched.
+
 ## Logging — 2026-04-25
 
 Added `sonner` toasts + runtime-toggled structured logger across all modules.

@@ -44,6 +44,8 @@ type AppData = {
   portfolio: Resource<PortfolioToken[]>;
   delegations: Resource<GrantPermission[]>;
   yieldPositions: Resource<YieldPositionsData>;
+  backendUrl: string;
+  privyToken: string;
 };
 
 function parsePortfolio(body: unknown): PortfolioToken[] {
@@ -122,7 +124,7 @@ export function AppDataProvider({
   );
 
   const value = React.useMemo<AppData>(
-    () => ({ portfolio, delegations, yieldPositions }),
+    () => ({ portfolio, delegations, yieldPositions, backendUrl, privyToken }),
     [
       portfolio.data,
       portfolio.loading,
@@ -133,6 +135,8 @@ export function AppDataProvider({
       yieldPositions.data,
       yieldPositions.loading,
       yieldPositions.error,
+      backendUrl,
+      privyToken,
     ],
   );
 
@@ -148,3 +152,7 @@ function useAppData(): AppData {
 export const usePortfolio = () => useAppData().portfolio;
 export const useDelegations = () => useAppData().delegations;
 export const useYieldPositions = () => useAppData().yieldPositions;
+export const useAppConfig = () => {
+  const { backendUrl, privyToken } = useAppData();
+  return { backendUrl, privyToken };
+};

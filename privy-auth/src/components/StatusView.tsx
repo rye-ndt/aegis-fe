@@ -4,8 +4,9 @@ import { AppDataProvider } from '../hooks/useAppData';
 import { HomeTab } from './HomeTab';
 import { ConfigsTab } from './ConfigsTab';
 import { DebugTab } from './DebugTab';
+import { PointsTab } from './PointsTab';
 
-type Tab = 'home' | 'configs' | 'debug';
+type Tab = 'home' | 'points' | 'configs' | 'debug';
 
 export function StatusView({
   eoaAddress,
@@ -30,6 +31,7 @@ export function StatusView({
     <AppDataProvider backendUrl={backendUrl} privyToken={privyToken}>
       <div className="w-full min-h-dvh bg-[#0f0f1a] overflow-y-auto">
         {tab === 'home' && <HomeTab delegationState={delegationState} />}
+        {tab === 'points' && <PointsTab />}
         {tab === 'configs' && (
           <ConfigsTab
             eoaAddress={eoaAddress}
@@ -48,6 +50,7 @@ export function StatusView({
 
 const TABS: { id: Tab; label: string; Icon: React.FC<{ active: boolean }> }[] = [
   { id: 'home',    label: 'Home',   Icon: HomeIcon },
+  { id: 'points',  label: 'Points', Icon: PointsIcon },
   { id: 'configs', label: 'Config', Icon: ConfigIcon },
   { id: 'debug',   label: 'Debug',  Icon: DebugIcon },
 ];
@@ -114,6 +117,14 @@ function DebugIcon({ active }: { active: boolean }) {
     <TabSvg active={active}>
       <polyline points="4 17 10 11 4 5" />
       <line x1="12" y1="19" x2="20" y2="19" />
+    </TabSvg>
+  );
+}
+
+function PointsIcon({ active }: { active: boolean }) {
+  return (
+    <TabSvg active={active}>
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
     </TabSvg>
   );
 }
