@@ -1,803 +1,299 @@
 # Privy Auth Mini-App — Status Log
 
-## Points tab — 2026-04-25
-
-Added a read-only **Points** tab surfacing loyalty balance, recent ledger activity, and the top-10 leaderboard. Initial implementation was reviewed and patched in the same day (see "Review fixes" below) before merge.
-
-**What**:
-- `src/components/StatusView.tsx` — `Tab` union extended to `'home' | 'points' | 'configs' | 'debug'`; `PointsIcon` (star polygon SVG) added; `TABS` array updated with the Points entry between Home and Config; render branch added.
-- `src/hooks/useAppData.tsx` — `AppData` context now includes `backendUrl` and `privyToken`; `useAppConfig()` selector exported so hooks outside the provider can read config without threading props.
-- `src/hooks/useLoyalty.ts` — three fetch hooks: `useLoyaltyBalance`, `useLoyaltyHistory` (cursor-based pagination + `loadMore()` + `hasMore`), `useLoyaltyLeaderboard`. Internal `useResilientGet` helper consolidates the get-with-cancellation-and-tick pattern (balance + leaderboard); history keeps a custom effect because it needs pagination + reset on visibility. Balance refetches on tab `visibilitychange`; history resets to page 0 on visibility. Leaderboard call intentionally omits `Authorization` header (public endpoint). `pointsTotal` is kept as an opaque string throughout — never passed through `Number()`. Each hook returns an explicit `unauthorized` flag so the UI can distinguish 401 from transient 5xx/network errors.
-- `src/components/PointsTab.tsx` — three stacked sections: balance card (large points number, season label, rank pill), recent activity list with skeleton shimmer, leaderboard. **Only** a real 401 (via `unauthorized` flag) collapses balance + history to leaderboard-only; transient errors render an inline message. Zero-points + empty history shows "No points yet" empty state.
-
-**Why**: hooks fetch fresh on mount/focus rather than going through `AppDataProvider` — loyalty data doesn't need to survive tab switches and avoids stale cache when points are awarded mid-session (no realtime push in v1).
-
-**Wire contract** (must match the BE `loyalty-program-plan.md` PR 2):
-- `GET /loyalty/balance` → `{ seasonId: string, pointsTotal: string, rank: number | null }`. `pointsTotal` is a bigint serialized as string.
-- `GET /loyalty/history?limit=&cursorCreatedAtEpoch=` → `{ entries: { actionType: string, points: string, createdAtEpoch: number }[], nextCursor: number | null }`. `createdAtEpoch` is **seconds**, matching the BE `newCurrentUTCEpoch()` convention. `nextCursor` is the `createdAtEpoch` of the last returned row (or null if no more).
-- `GET /loyalty/leaderboard?limit=` → `{ seasonId: string, entries: { rank: number, pointsTotal: string }[] }`. No `userId` exposed (privacy).
-- `actionType` must be one of the seven canonical BE action types: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `yield_deposit`, `yield_hold_day`, `referral`, `manual_adjust`. Unknown ids render as raw strings.
-
-**New conventions**:
-- Action label map lives at the top of `PointsTab.tsx` as `ACTION_LABELS: Record<string, string>`, keyed by the BE `actionType` ids above. Adding a new BE action type requires adding a label here, otherwise the raw id is shown — acceptable v1 behaviour.
-- `useAppConfig()` is the canonical way for hooks to access `backendUrl` + `privyToken` from context without threading props. Follows the same pattern as `usePortfolio` / `useDelegations` / `useYieldPositions`.
-- Timestamps from the BE are always **epoch seconds** (`newCurrentUTCEpoch()`), never milliseconds. Frontend helpers like `relativeTime(epochSeconds)` operate on seconds directly.
-- For paginated list hooks, expose `hasMore: boolean` (derived from `cursor != null`) rather than asking the UI to compare `data.length` against a page size — the latter breaks once any short page comes back.
-
-### Review fixes (same-day, 2026-04-25)
-
-The first cut was reviewed and the following were corrected before merge:
-
-1. **`relativeTime` was treating BE epochs as milliseconds** — would have rendered every entry as "~600000d ago". Now operates on seconds, matching `newCurrentUTCEpoch()`.
-2. **`is401` was triggering on any error** (transient 500 / network) — would silently collapse the user-scoped sections to leaderboard-only with no explanation. Replaced with an explicit `unauthorized: boolean` returned from each hook; only true 401s collapse.
-3. **`loadMore` button was gated on `data.length >= limit`** — stayed visible forever after a short final page and clicks were silent no-ops. Now gated on `hasMore = cursor != null`.
-4. **Wire shape was invented and didn't match the BE plan** — fields renamed to BE-aligned `actionType` / `points` / `createdAtEpoch`; cursor query param renamed to `cursorCreatedAtEpoch`; `ACTION_LABELS` keys updated to the seven canonical BE action types. (The previous keys — `swap`, `send`, `deposit`, `yield_withdraw`, `onramp` — were not in the BE plan and would have caused all award labels to fall back to raw ids.)
-5. **Two unused `eslint-disable react-hooks/exhaustive-deps` directives removed** from `useLoyalty.ts`.
-6. **Refactored to a shared `useResilientGet` helper** to consolidate the cancel-tick-visibility pattern across balance + leaderboard. History stays custom because pagination + reset don't fit the helper's shape.
-
-**Cross-cutting risk noted**: adding `backendUrl` + `privyToken` to the `AppData` context value means consumers of `usePortfolio` / `useDelegations` / `useYieldPositions` will re-render if the token rotates mid-session. In practice the token is stable for the lifetime of a Privy session, so this is benign — flagged here for the next time the auth flow is touched.
-
-## Logging — 2026-04-25
-
-Added `sonner` toasts + runtime-toggled structured logger across all modules.
-
-**What**: Created `src/utils/logger.ts` (`createLogger`). Migrated all 34
-`console.*` call sites to use `createLogger(scope)`. Mounted `<Toaster>` in
-`App.tsx`. Extended `useDebugEntries` to intercept `console.error` and
-`console.info`. Added a 4-button level toggle (debug/info/warn/error) to
-`DebugTab`.
-
-**Why**: Errors and warnings were invisible when a modal covered DebugTab or
-when the first fetch failed before UI hydrated. The runtime level gate allows
-turning on `debug` on a single device without a rebuild.
-
-**New conventions**: see "Logging & Debug Conventions" section below.
-
-**Not done (out of scope)**: remote log shipping, JSON logs, build-time stripping.
-
----
-
-## Scaling — 2026-04-24
-
-### Part 1: Resilient fetch (429/5xx backoff)
-
-All FE fetch helpers now route through `resilientFetch` (`src/utils/resilientFetch.ts`):
-- Retries 429/502/503/504 up to 4 times with jittered exponential backoff (base 250ms, max 2s).
-- Honors `Retry-After` header when present on 429/503.
-- Returns the last response after exhausting retries; 401/404/410 pass through immediately (not retried).
-- `loggedFetch` stays as the raw per-attempt request logger — `resilientFetch` composes on top of it.
-
-Call sites updated: `postResponse.ts`, `fetchNextRequest.ts`, `useFetch.ts`.
-
-`fetchNextRequest` keeps its outer 404-retry loop (6 × 400ms) — that loop waits for the backend to
-finish creating the next pending request. The `resilientFetch` inner loop handles transport errors.
-Do not collapse these two loops; they have different jobs.
-
-`toErrorMessage.ts` now returns `'Service is busy. Try again in a moment.'` when the status string is
-`429` or `503`, so users see a recoverable-sounding message if retries exhaust.
-
-### Part 2: Stateless-routing invariant
-
-The mini-app must not assume sticky routing to a single backend replica. Verified by grep
-on 2026-04-24 — zero hits for cookies, `credentials: 'include'`, Set-Cookie consumption,
-or server-issued opaque handles in client state.
-
-Every request is self-authenticating: `Authorization: Bearer <privyToken>` is attached by
-`postResponse.ts`, `fetchNextRequest.ts`, and every `useFetch` call site. All server-issued
-handles (`requestId`) are Redis-backed on the BE (`mini_app_req:{id}`,
-`pending_collection:{channelId}`) and resolve on any replica.
-
-Violations must be explicitly opted out with `// STATELESS-AUDIT: allowed because <reason>`
-in source, accompanied by backend-side sticky-routing configuration.
-
-No test runner is set up in this project; the static regression guard (Part 2, Step 2.1) is
-deferred until vitest or similar is added.
-
-## Yield Optimization — 2026-04-24
-
-Two new `SignRequest.kind` values, a `YieldDepositHandler`, and a `YieldPositions` component.
-
-### New `SignRequest.kind` values
-
-`types/miniAppRequest.types.ts` now carries:
-- `SignKind = 'yield_deposit' | 'yield_withdraw'` on the optional `kind` field of `SignRequest`.
-- `TxStep` — per-step tx shape (informational; execution still flows through the existing `to`/`value`/`data` fields + `fetchNextRequest` chaining).
-- `YieldDisplayMeta` — `protocolName`, `tokenSymbol`, `amountHuman`, `expectedApy?`.
-- Additional optional fields on `SignRequest`: `kind`, `chainId`, `protocolId`, `tokenAddress`, `steps`, `displayMeta`.
-
-Routing in `App.tsx`: inside the `'sign'` case, `request.kind === 'yield_deposit' | 'yield_withdraw'` routes to `YieldDepositHandler` before falling through to `SignHandler`.
-
-### `YieldDepositHandler` (`src/components/handlers/YieldDepositHandler.tsx`)
-
-Single file; `mode: 'deposit' | 'withdraw'` prop for copy differences.
-
-**Auto-open-and-sign behaviour** (when `autoSign === true` and `serializedBlob` present): the component opens in `'signing'` phase, immediately fires the session-key pipeline via `createSessionKeyClient` + `sendTransaction`, POSTs the tx hash, and calls `Telegram.WebApp.close()` after 1500ms. The mini-app flashes and closes with no user interaction.
-
-**Fallback / manual path** (when `autoSign === false`, or key unavailable at boot): shows a pre-sign confirmation screen with `displayMeta` detail (protocol, token, amount, APY for deposits). User taps "Deposit"/"Withdraw" → executes via `useSmartWallets().client` (EOA owner path, same as SignHandler manual).
-
-Auto-sign failures (createSessionKeyClient or sendTransaction) fall back to the manual pre-sign screen with an inline error banner.
-
-### `GET /yield/positions` contract
-
-`AppDataProvider` fetches `/yield/positions` and exposes it via `useYieldPositions()`. Response shape:
-```ts
-{ positions: YieldPosition[], totals: { principalHuman, currentValueHuman, pnlHuman } }
-```
-`YieldPosition` fields: `protocolId`, `protocolName`, `chainId`, `tokenSymbol`, `principalHuman`, `currentValueHuman`, `pnlHuman`, `pnl24hHuman`, `apy`.
-
-`parseYieldPositions` in `useAppData.tsx` normalises the response. Types exported: `YieldPosition`, `YieldPositionsData`.
-
-### `YieldPositions` component (`src/components/YieldPositions.tsx`)
-
-Inline section mounted in `HomeTab` below the portfolio list. Per-row: protocol name, token, current value, total PnL, 24h PnL, APY. Empty state: "No active yield positions. Try /yield in Telegram."
-
-Decision: inline section chosen over a dedicated `/positions` route — fewer clicks, matches "don't hide their money" requirement, and the portfolio screen is not crowded.
-
-### Deferred work
-
-- Partial withdrawal UI.
-- Multi-stable display (multiple tokens per protocol).
-- Position historical PnL chart.
-- Protocol logos for non-Aave protocols.
-- **BE must expose `GET /yield/positions`** — the FE contract is live but the backend route is not yet registered. Until it is, `YieldPositions` stays in its empty/error state.
-
-### Review fixes (2026-04-24, same day)
-
-- Verified BE now sets `request.kind = 'yield_deposit' | 'yield_withdraw'` and puts `displayMeta` on step 1 only, so `YieldDepositHandler` actually renders (previously dead code — BE was emitting SignRequests without `kind`).
-- `SignRequest` on BE side now mirrors the FE interface (`kind`, `chainId`, `protocolId`, `tokenAddress`, `displayMeta`).
-
-### New conventions introduced
-
-- Yield-related `SignRequest.kind` values are prefixed `yield_`.
-- Position data is fetched through `AppDataProvider` (`useYieldPositions()`) — never fetch ad hoc from a leaf component.
-- `YieldDepositHandler` is the pattern for yield sign flows: `mode` prop distinguishes deposit vs withdraw in one file.
-
----
-
-## /swap — 2026-04-24
-
-SignHandler now supports multi-step swaps by fetching the next queued
-`SignRequest` for the authenticated user after a successful autoSign
-response, before calling `Telegram.WebApp.close()`.
-
-**Endpoint contract.** `GET /request/:id?after=<prev>` requires
-`Authorization: Bearer <privyToken>` and returns the next pending
-`SignRequest` for that user. The backend indexes pending sign requests
-per user in a Redis ZSET (`user_pending_signs:<userId>`), so the lookup
-is O(log n), not a cache scan. FE calls it with a fixed-interval retry
-(6 × 400ms) because the backend creates step N+1 shortly after the FE
-posts step N's response (the capability's waitFor has to tick first).
-
-**Implementation shape.**
-- `utils/fetchNextRequest.ts` — plain async function (not a hook, so
-  moved out of `hooks/`). Passes privyToken as `Authorization: Bearer`,
-  retries 404s with fixed 400ms backoff, treats 410 as terminal-empty.
-- `SignHandler`:
-  - Session client (`createSessionKeyClient`) cached in a `useRef`
-    across steps — avoids ~200–400ms init per step.
-  - `currentRequest` state resyncs when the parent passes a new
-    `initialRequest.requestId` — keeps the component correct if the
-    dispatcher routes a different request mid-session.
-  - On any autoSign failure (key build or send), falls back to the
-    manual `SigningRequestModal` with an inline error banner. Reject
-    path remains wired; success paths use a 1.5s close delay per the
-    global TMA close convention.
-
-**Convention introduced:** a mini-app handler MAY keep the WebApp window
-open across multiple same-type requests when the backend signals a
-continuation. The default remains close-after-one. Only SignHandler
-participates today; other handlers retain their close-on-success
-behaviour.
-
-**Do not add `fetchNextRequest` back to `hooks/`.** The `hooks/` directory
-is for React hooks only (functions beginning with `use*`). Utility
-functions go under `utils/`.
-
-## Onramp — 2026-04-23
-
-Added `requestType: 'onramp'` handled by `components/handlers/OnrampHandler.tsx`.
-
-**Payload** (`OnrampRequest` in `src/types/miniAppRequest.types.ts`):
-`{ amount: number, asset: 'USDC', chainId: number, walletAddress: string }`.
-`walletAddress` is the user's **smart account** address — not the embedded EOA.
-
-**Behaviour:**
-- Auto-invokes `useFundWallet().fundWallet({ address, options })` on mount once `ready && authenticated`. No extra click — the Telegram button click was the confirmation.
-- Passes `address: request.walletAddress` explicitly so Privy funds the smart account, not the embedded EOA (the default). Silent mismatch here would deliver funds to an address the app doesn't treat as the user's wallet.
-- `chain: { id: request.chainId }` — Privy's `ChainLikeWithId = { id: number }`, so no helper file needed.
-- `asset: 'USDC' | 'native-currency'` — backend currently only emits USDC.
-- Errors (unsupported chain, modal closed) render a retry button plus the monospace smart-account address as a manual-deposit fallback.
-
-**Convention introduced:** a request handler may auto-invoke its primary action on mount (no confirmation screen) when the user has already confirmed upstream. Keeps the "minimal-clicks for non-web3 users" goal intact.
-
-**Not wired:** on-chain deposit settlement detection — that belongs on the backend.
-
 ## Overview
-A Telegram Mini App (TMA) front end for **Aegis**, an onchain AI agent. Handles
-Privy auth (Google + Telegram auto-login), ERC-4337 smart-wallet provisioning,
-ZeroDev session-key delegation, and a typed request/response bridge to the Aegis
-backend. Designed to open inside a Telegram WebView; degrades cleanly to a
-regular browser session for local dev.
+Telegram Mini App (TMA) for **Aegis**, an onchain AI agent. Handles Privy auth (Google + Telegram auto-login), ERC-4337 smart-wallet provisioning, ZeroDev session-key delegation, and a typed request/response bridge to the Aegis backend. Runs inside Telegram WebView; degrades to a normal browser session for dev.
 
-## Technical Stack
-- **Framework**: React 19 / Vite 8 / TypeScript (strict)
-- **Auth & Wallet**: Privy v3 SDK (`@privy-io/react-auth` + `/smart-wallets`)
-- **TMA SDK**: `@tma.js/sdk-react` (dynamic-imported inside `TelegramAutoLogin`)
-- **Chain tooling**: `viem` + `permissionless`
-- **Smart accounts**: ZeroDev Kernel v3.1 + EntryPoint 0.7
-  (`@zerodev/sdk`, `@zerodev/ecdsa-validator`, `@zerodev/permissions`)
-- **Chain**: Avalanche Fuji (chain id 43113) — hard-coded in `src/utils/crypto.ts`
-- **Styling**: Tailwind CSS v4 via `@tailwindcss/vite` (no `tailwind.config.*`)
-- **Bundling**: Vite with `vite-plugin-node-polyfills` (only `buffer`);
-  `@solana/kit`, `@solana-program/system`, `@solana-program/token` are marked
-  external in `build.rollupOptions` to avoid pulling in Privy's optional Solana
-  peer deps; `permissionless` must stay bundled (not external).
+## Tech Stack
+- React 19 / Vite 8 / TypeScript (strict)
+- Privy v3 (`@privy-io/react-auth` + `/smart-wallets`)
+- `@tma.js/sdk-react` (dynamic-imported in `TelegramAutoLogin`)
+- `viem` + `permissionless` ^0.2
+- ZeroDev Kernel v3.1 + EntryPoint 0.7 (`@zerodev/sdk`, `@zerodev/ecdsa-validator`, `@zerodev/permissions`)
+- Avalanche Fuji (43113) — hard-coded in `src/utils/crypto.ts`
+- Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.*`)
+- Vite + `vite-plugin-node-polyfills` (only `buffer`); `@solana/kit`, `@solana-program/system`, `@solana-program/token` external; `permissionless` must stay bundled.
 
 ## Project Layout
 ```
 src/
 ├── main.tsx                       # Privy + SmartWallets providers + TelegramAutoLogin
-├── App.tsx                        # Top-level router: auth gate → request dispatcher
+├── App.tsx                        # Router: auth gate → request dispatcher
 ├── index.css                      # Tailwind entry + TMA safe-area body padding
-├── telegram.d.ts                  # Global Telegram WebApp + CloudStorage types
+├── telegram.d.ts                  # Telegram WebApp + CloudStorage types
 ├── components/
 │   ├── TelegramAutoLogin.tsx      # Silent loginWithTelegram on TMA mount
-│   ├── ApprovalOnboarding.tsx     # Spending-limit grant UI (aegis_guard subtype)
-│   ├── StatusView.tsx             # Tabbed home orchestrator + TabDock
-│   ├── HomeTab.tsx                # Portfolio + delegation status
+│   ├── ApprovalOnboarding.tsx     # Spending-limit grant UI (aegis_guard)
+│   ├── StatusView.tsx             # Tabbed home (TabDock: home/points/configs/debug)
+│   ├── HomeTab.tsx                # Portfolio + delegation status + YieldPositions
+│   ├── PointsTab.tsx              # Loyalty balance, history, leaderboard
 │   ├── ConfigsTab.tsx             # Wallet/agent addresses, permissions, disconnect
-│   ├── DebugTab.tsx               # Console log viewer (uses useDebugEntries)
-│   ├── SigningRequestModal.tsx    # Manual sign fallback UI (used by SignHandler)
-│   ├── atomics/
-│   │   ├── icons.tsx              # ShieldIcon (size/variant), GoogleIcon
-│   │   ├── spinner.tsx            # Spinner (xs/sm/md/lg), LoadingSpinner (page)
-│   │   └── FullScreen.tsx         # FullScreen, FullScreenLoading/Error/Success
-│   ├── handlers/                  # AuthHandler, SignHandler, ApproveHandler
-│   └── views/
-│       └── login.tsx              # Full-screen login prompt
+│   ├── DebugTab.tsx               # Console viewer + level toggle
+│   ├── SigningRequestModal.tsx    # Manual sign fallback
+│   ├── YieldPositions.tsx         # Inline yield section in HomeTab
+│   ├── atomics/                   # icons.tsx, spinner.tsx, FullScreen.tsx
+│   ├── handlers/                  # AuthHandler, SignHandler, ApproveHandler,
+│   │                              # OnrampHandler, YieldDepositHandler
+│   └── views/login.tsx
 ├── hooks/
-│   ├── privy.ts                   # usePrivyToken — caches getAccessToken()
-│   ├── useRequest.ts              # Reads ?requestId=… and fetches /request/:id; exports fetchNextRequest
-│   ├── useFetch.ts                # Generic authed-GET hook (used by StatusView tabs)
-│   ├── useDebugEntries.ts         # Global console.log/warn interceptor + hook
-│   └── useDelegatedKey.ts         # Session-keypair state machine (start/unlock/remove)
-├── types/
-│   └── miniAppRequest.types.ts    # All request/response DTOs (single source of truth)
+│   ├── privy.ts                   # usePrivyToken
+│   ├── useRequest.ts              # Reads ?requestId=… and fetches /request/:id
+│   ├── useFetch.ts                # Generic authed-GET hook
+│   ├── useAppData.tsx             # AppDataProvider — portfolio/grants/yield/config
+│   ├── useLoyalty.ts              # useLoyaltyBalance / History / Leaderboard
+│   ├── useDebugEntries.ts         # console interceptor (filters [AEGIS:)
+│   └── useDelegatedKey.ts         # Session-keypair state machine
+├── types/miniAppRequest.types.ts  # Single source of truth for DTOs
 └── utils/
     ├── crypto.ts                  # Keypair gen, AES-GCM, ZeroDev session-key install
     ├── telegramStorage.ts         # CloudStorage wrapper + localStorage dev fallback
-    ├── loggedFetch.ts             # fetch() with [API] console tracing
-    ├── postResponse.ts            # Typed POST to backendUrl/response
-    └── toErrorMessage.ts          # unknown → string helper
+    ├── loggedFetch.ts             # raw per-attempt request logger
+    ├── resilientFetch.ts          # 429/5xx jittered backoff (retries 4x, 250ms→2s)
+    ├── fetchNextRequest.ts        # polls /request/:id?after=… for next step
+    ├── postResponse.ts            # Typed POST /response
+    ├── logger.ts                  # createLogger; sonner toasts on warn/error
+    └── toErrorMessage.ts
 ```
 
-Planning documents live under `constructions/` (one `.md` per feature rollout) —
-treat them as historical plans, not sources of truth.
+Planning docs under `constructions/` are historical, not source-of-truth.
 
 ## Environment Variables
-
 | Variable | Purpose |
 | -------- | ------- |
 | `VITE_PRIVY_APP_ID` | Privy application ID |
 | `VITE_BACKEND_URL`  | Backend HTTP API base URL (no trailing slash) |
-| `VITE_ZERODEV_RPC`  | ZeroDev bundler RPC — used for `publicClient` + bundler transport |
-| `VITE_PAYMASTER_URL`| ZeroDev paymaster RPC — optional; enables gas sponsorship in `createSessionKeyClient` |
+| `VITE_ZERODEV_RPC`  | ZeroDev bundler RPC (also paymaster — same URL) |
+| `VITE_PAYMASTER_URL`| ZeroDev paymaster RPC — enables gas sponsorship |
+| `VITE_LOG_LEVEL`    | `debug` \| `info` (default) \| `warn` \| `error` |
 
-All are read via `import.meta.env` and narrowed with `?? ''` at the call site.
-There is **no** `.env.example`; values come from whoever runs the dev server.
+All read via `import.meta.env`, narrowed with `?? ''`. No `.env.example`.
 
 ## Entry Wiring (`main.tsx`)
-- Calls `Telegram.WebApp.ready()`, `.expand()`, and sets header/background to
-  `#0f0f1a` **before** React mounts — matches the app background to prevent
-  flashes inside the TMA frame.
-- Providers, in order: `StrictMode > PrivyProvider > SmartWalletsProvider >
-  { TelegramAutoLogin, App }`.
-- `PrivyProvider` config:
-  - `loginMethods: ['google', 'telegram']`
-  - `appearance.theme: 'dark'`, `accentColor: '#7c3aed'`
-  - `embeddedWallets.ethereum.createOnLogin: 'users-without-wallets'`
+- Calls `Telegram.WebApp.ready()`, `.expand()`, header/background `#0f0f1a` **before** React mounts.
+- Providers: `StrictMode > PrivyProvider > SmartWalletsProvider > { TelegramAutoLogin, App }`.
+- PrivyProvider: `loginMethods: ['google','telegram']`, dark theme, accent `#7c3aed`, `embeddedWallets.ethereum.createOnLogin: 'users-without-wallets'`.
 
 ## Top-Level Flow (`App.tsx`)
-
-The app is a **single-route URL-driven dispatcher**. Branching order:
-
+Single-route URL-driven dispatcher:
 1. `!ready` → `<LoadingSpinner />`.
-2. `!authenticated || !privyToken`
-   - Inside Telegram *and* `tmaLoginTimedOut === false` → `<LoadingSpinner />`
-     (give `TelegramAutoLogin` up to `TMA_AUTO_LOGIN_TIMEOUT_MS = 4000` ms).
-   - Else → `<LoginView />`.
-3. No `requestId` → `<StatusView />` (the auth-gated status/config/debug page).
+2. `!authenticated || !privyToken` → spinner if inside TMA and `tmaLoginTimedOut===false` (timeout `TMA_AUTO_LOGIN_TIMEOUT_MS=4000`); else `<LoginView />`.
+3. No `requestId` → `<StatusView />`.
 4. `requestLoading` → spinner; `requestError` → `<ErrorView />`.
-5. Dispatch on `request.requestType`: `auth` → `AuthHandler`, `sign` →
-   `SignHandler`, `approve` → `ApproveHandler`. Unknown → `<ErrorView />`.
+5. Dispatch on `request.requestType`: `auth` → `AuthHandler`, `sign` → `SignHandler` (or `YieldDepositHandler` when `request.kind === 'yield_deposit' | 'yield_withdraw'`), `approve` → `ApproveHandler`, `onramp` → `OnrampHandler`.
 
-Session-key auto-bootstrap (after auth, before dispatch):
-- Guarded by `autoKeyStartedRef` so it only runs once.
-- **Skipped entirely for `auth` requests** — `AuthHandler` calls `start()`
-  itself once the backend returns `approveRequestId`.
-- Inside Telegram *and* no `requestId` → `delegatedKey.start()` (create if
-  missing).
-- Anywhere else → `delegatedKey.unlock()` (restore-only; no popup).
+Session-key auto-bootstrap: guarded by `autoKeyStartedRef`. Skipped for `auth` requests (AuthHandler runs `start()` itself). Inside TMA + no `requestId` → `delegatedKey.start()`. Else → `delegatedKey.unlock()` (restore-only, no popup).
 
 ## Typed Request/Response Contract
-
-`src/types/miniAppRequest.types.ts` is the **only** source of truth for the
-TMA ↔ backend protocol. Every handler and response posts flow through this file.
-
+`src/types/miniAppRequest.types.ts` is the **only** source of truth.
 ```ts
 RequestType    = 'auth' | 'sign' | 'approve' | 'onramp'
 ApproveSubtype = 'session_key' | 'aegis_guard'
+SignKind       = 'yield_deposit' | 'yield_withdraw'  // optional; routes to YieldDepositHandler
 ```
-
 - `AuthRequest` → `{ telegramChatId }`
-- `SignRequest` → `{ to, value (wei dec string), data (0x), description,
-  autoSign }`
-- `ApproveRequest` → `{ subtype, suggestedTokens?, reapproval?, tokenAddress?,
-  amountRaw? }`
-- `OnrampRequest` → `{ amount, asset: 'USDC', chainId, walletAddress }`
+- `SignRequest` → `{ to, value (wei dec string), data (0x), description, autoSign, kind?, chainId?, protocolId?, tokenAddress?, steps?, displayMeta? }`
+- `ApproveRequest` → `{ subtype, suggestedTokens?, reapproval?, tokenAddress?, amountRaw? }`
+- `OnrampRequest` → `{ amount, asset:'USDC', chainId, walletAddress }` (`walletAddress` is the SCA, **not** the EOA)
 
-Responses go to `POST {backendUrl}/response` via `postResponse()`; the response
-shape mirrors the request type (`AuthResponse`, `SignResponse`,
-`ApproveResponse`).
+Responses: `POST {backendUrl}/response` via `postResponse()`. Shapes mirror request type.
 
-## Backend HTTP Endpoints (consumed by FE)
-
+## Backend HTTP Endpoints (consumed)
 | Method & Path | Used by |
 | -------- | ------- |
 | `GET  /request/:requestId`              | `useRequest` |
-| `GET  /request/:requestId?after=<id>`   | `fetchNextRequest` — returns next queued step or 404 |
+| `GET  /request/:requestId?after=<id>`   | `fetchNextRequest` (next queued step or 404) |
 | `POST /response`                         | `postResponse` |
-| `GET  /portfolio`                        | `StatusView` (home tab) |
-| `GET  /delegation/grant`                 | `StatusView` (configs tab permissions list) |
-| `POST /delegation/grant`                 | `ApprovalOnboarding` (confirm spending limits) |
-| `GET  /delegation/approval-params`       | `ApprovalOnboarding` (on mount; forwards `tokenAddress` + `amountRaw` query when present) |
+| `GET  /portfolio`                        | `AppDataProvider` (HomeTab) |
+| `GET  /yield/positions`                  | `AppDataProvider` (YieldPositions) |
+| `GET  /delegation/grant`                 | `AppDataProvider` (ConfigsTab) |
+| `POST /delegation/grant`                 | `ApprovalOnboarding` |
+| `GET  /delegation/approval-params`       | `ApprovalOnboarding` (forwards `tokenAddress`+`amountRaw` query) |
+| `GET  /loyalty/balance`                  | `useLoyaltyBalance` |
+| `GET  /loyalty/history?limit=&cursorCreatedAtEpoch=` | `useLoyaltyHistory` |
+| `GET  /loyalty/leaderboard?limit=`       | `useLoyaltyLeaderboard` (no auth header) |
 
-All authenticated calls use `Authorization: Bearer ${privyToken}`.
-Error handling: treat `!r.ok` as failure; surface status code in UI. 404/410 on
-`/request/:id` map to `"Request not found or expired"` / `"Request expired"`.
+All authed calls send `Authorization: Bearer ${privyToken}`. 404/410 on `/request/:id` → "not found" / "expired".
 
 ## Handlers
 
 ### `AuthHandler`
-Three-step effect chain, each guarded by its own `useRef` to prevent StrictMode
-double-fires:
-1. POST auth response → gets back optional `approveRequestId`.
-   `telegramChatId` prefers `Telegram.WebApp.initDataUnsafe.user.id` over
-   `request.telegramChatId`.
-2. If `approveRequestId` returned, call `startDelegatedKey()` once the state is
-   `idle`.
-3. When `delegatedKeyState.status === 'done'`, POST approve response with
-   `subtype: 'session_key'` + `delegationRecord`.
-4. On `allDone`, call `Telegram.WebApp.close()` after 1500 ms (fixed pattern —
-   all success states close the TMA this way).
+Three-step effect chain, each ref-guarded against StrictMode:
+1. POST auth response → optional `approveRequestId`. Prefer `Telegram.WebApp.initDataUnsafe.user.id` over `request.telegramChatId`.
+2. If `approveRequestId`, call `startDelegatedKey()` once state is `idle`.
+3. On `done`, POST approve response with `subtype: 'session_key'` + `delegationRecord`.
+4. On `allDone`, `Telegram.WebApp.close()` after 1500ms.
 
 ### `SignHandler`
-- Uses internal `currentRequest` state (initialised from the `request` prop) so
-  the handler can advance through swap steps without unmounting.
-- `autoSign === true`: await `serializedBlob`, build a ZeroDev session client
-  with `createSessionKeyClient` (cached in `sessionClientRef` across steps —
-  avoids the ~200–400 ms re-init per step), `sendTransaction({ chain: null })`,
-  POST `{ txHash }`. After success, call `fetchNextRequest(backendUrl,
-  currentRequest.requestId)`. If a next `SignRequest` comes back, reset
-  `autoSignAttemptedRef` and `setCurrentRequest(next)` — the effect re-fires
-  for the new step. On 404, close the TMA.
-- Fallback to manual: 10 s timer fires if `serializedBlob` never arrives.
-- Manual path: render `<SigningRequestModal />`. The modal's `approve` uses
-  `useSmartWallets().client` (owner EOA, *not* the session key) to send the tx.
-- Reject path always POSTs `{ rejected: true }` and calls `.close()`.
+- `currentRequest` state initialised from prop; resyncs when parent passes a new `requestId`.
+- `autoSign === true`: build session client via `createSessionKeyClient` (cached in `sessionClientRef` across steps), `sendTransaction({ chain: null })`, POST `{ txHash }`. Then `fetchNextRequest(...)` — if next, reset `autoSignAttemptedRef` + `setCurrentRequest(next)`; on 404, close.
+- Manual fallback (`autoSign:false`, or 10s timer with `keyStatus !== 'processing'`): render `<SigningRequestModal />`. Approve uses `useSmartWallets().client.sendTransaction` (Privy EOA path, no paymaster).
+- Reject → POST `{ rejected: true }` + close.
+- Takes `keyStatus` prop; only arms 10s fallback when not `processing` (see Rule 5 below).
+
+### `YieldDepositHandler`
+Single file; `mode: 'deposit' | 'withdraw'`. Auto-open-and-sign when `autoSign && serializedBlob`: opens in `'signing'`, runs the session-key pipeline, POSTs txHash, closes after 1500ms. Fallback shows pre-sign confirmation with `displayMeta` (protocol, token, amount, APY); manual send goes through `useSmartWallets().client`. Auto-sign failures fall back to the manual screen with inline error banner. Currently waits indefinitely on blob (no fallback timer).
 
 ### `ApproveHandler`
-- `subtype === 'session_key'`: auto-triggers `startDelegatedKey()`, POSTs
-  the delegation record, closes on success. Success/processing/error UI lives
-  inline in the component (shield icon, spinner, red error text).
-- `subtype === 'aegis_guard'`: renders `<ApprovalOnboarding />` (spending-limit
-  onboarding). `ApprovalOnboarding` reads `tokenAddress` + `amountRaw` from
-  **props only** — it never reads the URL.
+- `subtype === 'session_key'`: auto `startDelegatedKey()`, POST delegation record, close.
+- `subtype === 'aegis_guard'`: render `<ApprovalOnboarding />`. ApprovalOnboarding reads `tokenAddress`+`amountRaw` from **props only** — never URL.
+
+### `OnrampHandler`
+Auto-invokes `useFundWallet().fundWallet({ address: request.walletAddress, chain: { id: request.chainId }, options: { asset: 'USDC' } })` once `ready && authenticated`. No confirmation (already confirmed upstream by Telegram button click). Errors render retry + monospace SCA address fallback. **Convention:** a handler may auto-invoke its primary action when the user already confirmed upstream.
 
 ## `useDelegatedKey` Conventions
-- **Deterministic seed** — the keypair blob is AES-GCM encrypted with
-  `privyDid` as the PBKDF2 password. No user prompt, ever.
-- **Storage key** is the constant `STORAGE_KEY = "delegated_key"` in
-  Telegram CloudStorage (see `telegramStorage.ts` for the localStorage fallback).
-- **State machine**: `idle | processing{step} | done{record} | error{message}`.
-- `start()` is idempotent: checks CloudStorage first; decrypt-on-hit, create +
-  install-on-chain + encrypt on miss. Decryption failure falls through to
-  create (typical cause: user re-created the Privy account).
-- `unlock()` is restore-only — never generates, never triggers a Privy popup.
-  Stale/undecryptable blobs are cleared and state drops to `idle`.
-- `removeKey()` wipes CloudStorage and transitions to `error` with a
-  "reload to create a new one" message.
-- `updateBlob(newBlob)` re-encrypts + persists without regenerating the
-  keypair — used by downstream flows that reinstall on-chain permissions.
-- User-rejection detection: `(err.code === 4001)` or
-  `err.message.includes('User rejected')`.
-- Exposes both `serializedBlob` state (re-renders) and a `serializedBlobRef`
-  (synchronous access inside async callbacks) — **deliberate**, so SSE/auto-sign
-  consumers can observe the update while async code keeps its latest value.
-- `DEFAULT_PERMISSIONS` in this file is a placeholder (native AVAX, ~30 days,
-  1 × 10¹⁸). Real per-token limits flow through `ApprovalOnboarding` →
-  `POST /delegation/grant`.
+- **Deterministic seed** — keypair AES-GCM encrypted with `privyDid` as PBKDF2 password. No prompt ever.
+- Storage key: `STORAGE_KEY = "delegated_key"` in Telegram CloudStorage.
+- State machine: `idle | processing{step} | done{record} | error{message}`.
+- `start()` idempotent: CloudStorage hit → decrypt; miss → create + install + encrypt. Decrypt failure falls through to create.
+- `unlock()` restore-only — never generates, never popups. Stale blobs cleared, drops to `idle`.
+- `removeKey()` wipes CloudStorage; transitions to `error` ("reload to create").
+- `updateBlob(newBlob)` re-encrypts without regenerating (used when reinstalling on-chain permissions).
+- Rejection: `err.code === 4001` or `err.message.includes('User rejected')`.
+- Exposes both `serializedBlob` state **and** `serializedBlobRef` (sync access in async callbacks) — deliberate.
+- `DEFAULT_PERMISSIONS` is placeholder (native AVAX, ~30d, 1×10¹⁸); real per-token limits flow through `ApprovalOnboarding` → `POST /delegation/grant`.
 
 ## `utils/crypto.ts` Conventions
-- **Never** use `installSessionKeyWithErc20Limits` — it was removed in the
-  frictionless delegation refactor (2026-04-22). Only `installSessionKey`
-  (sudo policy) exists now. Per-token limits are enforced **server-side**, not
-  on-chain.
-- AES-GCM blob layout (base64-encoded): `[16 salt][12 iv][ciphertext]`,
-  PBKDF2-SHA256 @ 100 000 iters. `encryptBlob` / `decryptBlob` are the only
-  API. Don't hand-roll.
-- Session-key install path: `privy embedded provider → viem WalletClient →
-  toOwner → signerToEcdsaValidator → toECDSASigner(empty account, addr only)
-  → toPermissionValidator({ policies: [toSudoPolicy({})] }) →
-  createKernelAccount({ plugins: { sudo, regular } }) →
-  serializePermissionAccount(account, sessionPrivateKey)`.
-- **The serialized blob contains the session private key.** Store only in
-  CloudStorage (encrypted). **Never** send it to the backend.
-- `createSessionKeyClient` paymaster wiring: pass `paymasterUrl` to get a
-  sponsored `KernelAccountClient`; omit to pay gas from the SCA balance.
+- **Never** use `installSessionKeyWithErc20Limits` (removed 2026-04-22). Only `installSessionKey` (sudo policy) exists. Per-token limits enforced **server-side**.
+- AES-GCM blob: `[16 salt][12 iv][ciphertext]`, PBKDF2-SHA256 @ 100k iters. Use `encryptBlob`/`decryptBlob` only.
+- Install path: `privy embedded provider → viem WalletClient → toOwner → signerToEcdsaValidator → toECDSASigner(empty addr) → toPermissionValidator({ policies:[toSudoPolicy({})] }) → createKernelAccount({ plugins:{sudo,regular} }) → serializePermissionAccount(account, sessionPrivateKey)`.
+- **Serialized blob contains the session private key.** Store only in (encrypted) CloudStorage. **Never** send to backend.
+- `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)` paymaster: pass URL → sponsored client; omit → SCA pays.
 
 ## Styling Conventions
-- **Background**: `bg-[#0f0f1a]` for full-screen pages; `bg-[#161624]` or
-  `bg-[#16162a]` for surface cards; `bg-white/5` / `bg-white/[0.04]` for
-  inline rows.
-- **Borders**: `border border-white/10` (cards), `border-white/[0.08]`
-  (subtle), `border-violet-500/20` (accent/focused).
-- **Brand accent**: violet-500/600 (`#7c3aed`) with indigo-600 (`#4f46e5`)
-  gradients; success emerald-400 (`#34d399`); warning amber-500; error
-  red-400/500.
-- **Shield + checkmark icon** is the Aegis logo motif — reused across login,
-  approval success, `ApprovalOnboarding`, and `AuthHandler` success. Use the
-  same SVG shape and a per-instance `linearGradient id` (e.g. `auth-ok-shield`,
-  `shield-onboard`) because React renders several on-screen.
-- **Full-screen layout**: `flex flex-col items-center justify-center w-full
-  min-h-dvh bg-[#0f0f1a] px-6 gap-N`. Use `min-h-dvh` (dynamic viewport)
-  everywhere so Telegram's collapsible WebApp resizes correctly.
-- **Spinner**: `w-8 h-8 rounded-full border-2 border-violet-500/20
-  border-t-violet-500 animate-spin` (small variants exist; keep the same
-  colours).
-- **Labels**: `text-[10px] font-semibold tracking-widest text-white/30
-  uppercase` for section captions throughout.
-- **Safe areas**: `index.css` already applies `env(safe-area-inset-*)` to
-  `body` — component code shouldn't re-add this.
-- Prefer Tailwind arbitrary values (`text-[11px]`, `bg-white/[0.04]`) over
-  config extensions. No `tailwind.config.*` exists.
+- BG: `bg-[#0f0f1a]` full-screen; `bg-[#161624]` / `#16162a` cards; `bg-white/5` / `bg-white/[0.04]` rows.
+- Borders: `border-white/10` (cards), `/[0.08]` subtle, `border-violet-500/20` accent.
+- Brand: violet-500/600 (`#7c3aed`) + indigo-600 gradients; emerald-400 success; amber-500 warn; red-400/500 error.
+- Shield+checkmark = Aegis logo (use per-instance `linearGradient id` like `auth-ok-shield`).
+- Full-screen layout: `flex flex-col items-center justify-center w-full min-h-dvh bg-[#0f0f1a] px-6 gap-N`. Always `min-h-dvh`.
+- Spinner: `w-8 h-8 rounded-full border-2 border-violet-500/20 border-t-violet-500 animate-spin`.
+- Section labels: `text-[10px] font-semibold tracking-widest text-white/30 uppercase`.
+- Safe areas already on `body` in `index.css` — don't re-add.
+- Prefer Tailwind arbitrary values; no `tailwind.config.*` exists.
 
 ## Telegram WebView Conventions
-- `window.Telegram?.WebApp?.initData` presence is the canonical check for
-  "running inside Telegram" — see `isInsideTelegram()` in `App.tsx` and the
-  guards in `TelegramAutoLogin`.
-- All success flows close the TMA via `window.Telegram?.WebApp?.close()`,
-  usually after a 1500 ms "Taking you back to Telegram…" screen.
-- CloudStorage is version-gated: anything below WebApp v6.9 (or absent) uses
-  the localStorage mock installed in `telegramStorage.ts` at module load time.
-  Do not call `CloudStorage` APIs directly — go through `cloudStorageGetItem /
-  SetItem / RemoveItem`.
-- `TelegramAutoLogin` is **silent** by design: it never surfaces errors to the
-  UI, logs only in `import.meta.env.DEV`, and exits early on any guard
-  failure so `LoginView` can still render for manual login. `loginWithTelegram`
-  is runtime-available but sometimes missing from the Privy types — the
-  `@ts-ignore` at the destructure is intentional until upstream types ship.
+- `window.Telegram?.WebApp?.initData` presence = canonical "inside Telegram" check (`isInsideTelegram()` in `App.tsx`).
+- All success flows: `window.Telegram?.WebApp?.close()` after 1500ms "Taking you back…" screen.
+- CloudStorage gated to WebApp v6.9+; `telegramStorage.ts` installs a localStorage mock at module load. Always go through `cloudStorageGetItem/SetItem/RemoveItem`.
+- `TelegramAutoLogin` is silent: errors never surface, logs only in `import.meta.env.DEV`. `loginWithTelegram` `@ts-ignore` is intentional.
 
-## Logging & Debug Conventions
+## Logging & Debug
+- **Logger** (`src/utils/logger.ts`): `const log = createLogger('Module')`. Raw `console.*` forbidden except early `main.tsx` bootstrap.
+- Levels: `debug`/`info` → console + DebugTab buffer; `warn`/`error` → also sonner toasts.
+- Runtime gate: `localStorage["aegis.logLevel"]` or `window.__aegisLog("debug")`. Build-time default via `VITE_LOG_LEVEL=info`.
+- Output prefix `[AEGIS:scope]` — `useDebugEntries` filters on this.
+- DebugTab levels: log (white), info (blue), warn (yellow), error (red); 4-button toggle.
+- **Privacy:** never log `privyToken`, `initData`, `serializedBlob`, `privyDid`, signatures. Truncate via `token.slice(0,8)+'…'`.
+- **Step pattern (handlers):** `log.info('step', { step: 'started'|'submitted'|'succeeded'|'failed', requestId })`.
+- `<Toaster>` mounted once in `App.tsx`: `position="top-center" richColors closeButton theme="dark"`.
+- Dev-only UI (e.g. "Wipe CloudStorage" in `ApprovalOnboarding`) gated on `import.meta.env.DEV`.
 
-### Logger (`src/utils/logger.ts`) — 2026-04-25
+## Coding Conventions
+- React 19 function components only. Default export only at `App.tsx` / `main.tsx`.
+- Refs guard StrictMode double-fires (`hasStartedRef`, `attemptedRef`, `authPostedRef`, …) on every single-shot effect.
+- `0x${string}` for addresses/hex; raw amounts: `string` over wire, `BigInt(...)` at call site.
+- Async IIFE in `useEffect`; never `async` the effect itself.
+- Errors: `toErrorMessage(err)` for display; otherwise narrow with `err instanceof Error`.
+- Flat by convention — `src/utils` and `src/components` (except `atomics/`, `handlers/`, `views/`).
+- `eslint-disable-next-line react-hooks/exhaustive-deps` allowed when narrowly scoped.
 
-Every module uses `createLogger(scope)`. Raw `console.*` calls are forbidden
-except in the early bootstrap of `main.tsx` if strictly needed.
+## Build & Scripts
+`dev`/`build`/`typecheck` (`tsc -b`)/`lint`/`preview`. `overrides.ox: 0.14.5` pinned for Privy/viem transitive — don't bump without checking peer range.
 
-```ts
-import { createLogger } from '../utils/logger';
-const log = createLogger('MyModule');
-log.debug('cache-hit', { address });
-log.info('step', { step: 'started', requestId });
-log.warn('retries-exhausted', { attempts });
-log.error('send-failed', { err: msg });
-```
+---
 
-**Toast policy**: only `warn` and `error` trigger sonner toasts. `debug` and
-`info` go to console + DebugTab buffer only.
+## Feature Log
 
-**Level gate**: runtime-switchable via `localStorage["aegis.logLevel"]`
-(`"debug" | "info" | "warn" | "error"`) or `window.__aegisLog("debug")` from
-the device's remote console / DebugTab. Persists across reloads.
+### Points / Loyalty (2026-04-25)
+Read-only Points tab: balance card, recent ledger activity (cursor-paginated), top-10 leaderboard.
+- Hooks (`useLoyalty.ts`): `useLoyaltyBalance`, `useLoyaltyHistory` (`loadMore()`+`hasMore`), `useLoyaltyLeaderboard`. Internal `useResilientGet` consolidates cancel+tick+visibility for balance/leaderboard. Each hook returns explicit `unauthorized` flag — only true 401 collapses to leaderboard-only.
+- Balance refetches on `visibilitychange`; history resets to page 0.
+- `pointsTotal` is opaque string throughout — never `Number()`.
+- Leaderboard call omits `Authorization` (public endpoint).
+- `ACTION_LABELS` map at top of `PointsTab.tsx`. Seven canonical BE actionTypes: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `yield_deposit`, `yield_hold_day`, `referral`, `manual_adjust`. Unknown ids render raw.
+- BE timestamps are **epoch seconds** (`newCurrentUTCEpoch()`) — `relativeTime` operates on seconds.
+- `nextCursor` = `createdAtEpoch` of last row or null. `hasMore = cursor != null` (never compare lengths).
 
-**Build-time default**: `VITE_LOG_LEVEL` env var (default `"info"`).
+### Yield Optimization (2026-04-24)
+- New `SignKind` values `yield_deposit | yield_withdraw` route to `YieldDepositHandler` before `SignHandler`.
+- Wire contract `GET /yield/positions` → `{ positions: YieldPosition[], totals: { principalHuman, currentValueHuman, pnlHuman } }`. `YieldPosition`: `protocolId, protocolName, chainId, tokenSymbol, principalHuman, currentValueHuman, pnlHuman, pnl24hHuman, apy`. `parseYieldPositions` in `useAppData.tsx` normalises.
+- `YieldPositions` component mounted inline below portfolio in `HomeTab` (chosen over a dedicated route).
+- **Convention:** yield `SignRequest.kind` prefixed `yield_`; positions go through `AppDataProvider` (`useYieldPositions()`) — never ad-hoc fetch.
 
-| Var | Default | Purpose |
-|---|---|---|
-| `VITE_LOG_LEVEL` | `info` | Initial level baked at build time |
+### Multi-step swap (2026-04-24)
+`SignHandler` chains via `fetchNextRequest(backendUrl, requestId)` on `GET /request/:id?after=<prev>`; backend indexes pending sign requests per-user in Redis ZSET (`user_pending_signs:<userId>`). Fixed-interval retry 6×400ms (BE creates step N+1 shortly after FE posts step N). Convention: a handler MAY keep the WebApp open across multiple same-type requests when BE signals continuation; default remains close-after-one. **`fetchNextRequest` lives in `utils/`, not `hooks/`** — utilities, not React hooks.
 
-**DebugTab filter**: `useDebugEntries` captures only lines containing `[AEGIS:`
-(load-bearing noise filter against Privy SDK chatter). The logger always
-produces `[AEGIS:scope]`-prefixed output, so every `createLogger` call is
-automatically captured.
+### Onramp (2026-04-23)
+`requestType: 'onramp'` → `OnrampHandler` (see Handlers above).
 
-**Levels in DebugTab**: `log` (white), `info` (blue), `warn` (yellow),
-`error` (red). A 4-button level toggle in DebugTab calls `setLogLevel` at
-runtime.
+### Resilient fetch (2026-04-24)
+- `resilientFetch.ts`: retries 429/502/503/504 up to 4× with jittered exp backoff (250ms→2s); honors `Retry-After`; 401/404/410 pass through immediately. Used in `postResponse`, `fetchNextRequest`, `useFetch`.
+- `fetchNextRequest` keeps its own outer 404-retry loop (6×400ms) for "BE creating next step" — different job from `resilientFetch`'s transport retry. Don't collapse.
+- `toErrorMessage`: 429/503 → `'Service is busy. Try again in a moment.'`.
+- **Stateless-routing invariant** (verified 2026-04-24): zero use of cookies, `credentials: 'include'`, or server-issued opaque handles in client state. Every request self-authenticates with `Authorization: Bearer <privyToken>`. Server-issued `requestId` resolves on any replica via Redis. Violations require `// STATELESS-AUDIT: allowed because <reason>` + BE sticky-routing config.
 
-**Privacy**: never log `privyToken`, `initData`, `serializedBlob`, `privyDid`,
-or any signature material. Truncate (`token.slice(0,8)+'…'`) if you must
-reference a token.
+### AppDataProvider — global tab data (2026-04-23)
+`useAppData.tsx` owns `useFetch` for portfolio, grants, yield positions; provider mounted once around `StatusView` tabs so tab-switch doesn't refire fetches. Selectors: `usePortfolio()`, `useDelegations()`, `useYieldPositions()`, `useAppConfig()` (returns `{backendUrl, privyToken}`). Parsers (`parsePortfolio`, `parseGrants`, `parseYieldPositions`) and types live here. **Convention:** shared cross-tab data belongs in `AppDataProvider`; do not call `useFetch` inline in tabs that can be unmounted by `TabDock`. Mutation refresh hook not yet wired (provider lifetime ≈ one session).
+**Cross-cutting risk:** `backendUrl`+`privyToken` in context value re-render consumers when token rotates; benign because Privy tokens are stable for session lifetime.
 
-**Step logging convention for handlers**:
-```ts
-log.info('step', { step: 'started' | 'submitted' | 'succeeded' | 'failed', requestId });
-```
+### ConfigsTab permissions field alignment (2026-04-23)
+FE was reading `symbol`/`maxAmount`/`spent` but BE (`TokenDelegation`) emits `tokenSymbol`/`limitRaw`/`spentRaw`/`tokenDecimals`. Renamed FE fields. **Convention:** when surfacing delegation rows, divide `limitRaw`/`spentRaw` by `10 ** tokenDecimals` via BigInt — never display raw.
 
-### Sonner (`<Toaster>`)
+### Frictionless delegation refactor (2026-04-22) — REMOVED, do not reintroduce
+`PasswordDialog`, `AegisGuardToggle`, `AegisGuardModal`, `useAegisGuard`, `installSessionKeyWithErc20Limits`, `Erc20SpendingLimit`, password-based blob encryption.
 
-Mounted once in `App.tsx` (top-level JSX fragment) with
-`position="top-center" richColors closeButton theme="dark"`. All `log.warn` /
-`log.error` calls surface as toasts so errors are visible even when DebugTab
-is hidden by a modal or the first fetch fails before UI hydrates.
+### Dead-code cleanup (2026-04-23) — REMOVED, do not reintroduce
+`SigningApprovalModal`, `signingInterceptor`, `decodeEip712`, `DelegationDebugPanel`, `ErrorView` (replaced by `FullScreenError`), unused `Keypair` / `AegisGrant` / duplicate `DelegationRecord` exports.
 
-### Legacy
-The informal `[Delegation]`, `[SignHandler]`, `[TelegramAutoLogin]`,
-`[ApproveHandler]`, `[API]` tags are replaced by the scoped logger. Do not
-add new raw `console.*` calls — use `createLogger` instead.
+### Shared atomics (post-2026-04-23)
+- `atomics/spinner.tsx`: `<Spinner size="xs|sm|md|lg" />`, `<LoadingSpinner />`.
+- `atomics/icons.tsx`: `<ShieldIcon size? variant="violet|success">` (gradient id via `useId()`), `<GoogleIcon />`.
+- `atomics/FullScreen.tsx`: `<FullScreen>`, `<FullScreenLoading step?>`, `<FullScreenError message showClose?>`, `<FullScreenSuccess title subtitle?>` — caller still calls `.close()` itself.
 
-- Dev-only UI (e.g. "Wipe CloudStorage" button in `ApprovalOnboarding`) is
-  gated behind `import.meta.env.DEV`.
+---
 
-## Coding Conventions (this app)
-- React 19, function components only, default export only at `App.tsx` and
-  `main.tsx`; every other export is named.
-- Refs are used aggressively to guard against StrictMode double-fires and to
-  prevent re-entry on single-shot effects (`hasStartedRef`, `attemptedRef`,
-  `authPostedRef`, etc.). New effects with side effects follow the same
-  pattern.
-- `eslint-disable-next-line react-hooks/exhaustive-deps` is acceptable on
-  effects that are intentionally locked to a subset of deps — keep the
-  disable narrowly scoped and add a comment if non-obvious.
-- Type-level: `0x${string}` for addresses / hex; raw-integer amounts are
-  `string` over the wire and `BigInt` at call sites (`BigInt(request.value)`).
-- Async IIFEs (`(async () => { … })()`) inside `useEffect` are preferred over
-  returning a promise; never mark the effect itself `async`.
-- Error mapping: `toErrorMessage(err)` when displaying; otherwise narrow with
-  `err instanceof Error`.
-- Prefer small sibling helpers and avoid new folders — `src/utils` and
-  `src/components` are flat by convention (except `atomics/`, `handlers/`,
-  `views/`).
+## Critical Rules — Sign Flow (DO NOT VIOLATE)
 
-## Build & Scripts (`package.json`)
-- `dev`        — `vite`
-- `build`      — `vite build`
-- `typecheck`  — `tsc -b` (project-refs; runs `tsconfig.app.json` +
-  `tsconfig.node.json`)
-- `lint`       — `eslint .` (flat config at `eslint.config.js`)
-- `preview`    — `vite preview`
-- `overrides.ox: 0.14.5` — pinned to resolve a Privy/viem transitive mismatch.
-  Don't bump without checking Privy's peer range.
+Source: hard-won fixes 2026-04-24. Read before touching `SignHandler.tsx`, `YieldDepositHandler.tsx`, or any new auto-signing handler.
 
-## Known Invariants / Gotchas
-- **Chain is hard-coded to Avalanche Fuji** in `crypto.ts`. Any multi-chain
-  support requires threading `chain` through `installSessionKey`,
-  `createSessionKeyClient`, and the wallet/public clients.
-- **Privy token refresh** is the caller's responsibility — `usePrivyToken`
-  fetches once on `authenticated` flip; long-lived sessions may see stale
-  tokens. Re-mount or call `getAccessToken()` if a 401 bounces back.
-- `useRequest` reads `requestId` from `window.location.search` at mount and
-  does **not** re-run on URL changes. For chained swap steps, `SignHandler`
-  uses `fetchNextRequest` directly rather than re-invoking the hook — the URL
-  `requestId` stays fixed for the lifetime of the WebApp open.
-- `SmartWalletsProvider` must wrap `App` (and `TelegramAutoLogin`, which
-  happens to sit outside but doesn't use smart wallets) — `useSmartWallets()`
-  throws otherwise.
-- The frictionless-delegation refactor (2026-04-22) removed:
-  `PasswordDialog`, `AegisGuardToggle`, `AegisGuardModal`, `useAegisGuard`,
-  `installSessionKeyWithErc20Limits`, `Erc20SpendingLimit`, and the
-  `password`-based blob encryption path. Do not reintroduce these names.
-- The dead-code cleanup (2026-04-23) removed:
-  `SigningApprovalModal`, `signingInterceptor`, `decodeEip712`,
-  `DelegationDebugPanel`, `ErrorView` (replaced by `FullScreenError`), and
-  the unused `Keypair` / `AegisGrant` / duplicate `DelegationRecord` type
-  exports. Do not reintroduce these — the signing-interception EIP-712
-  preview flow is not wired in; bring it back as a new module if needed.
+### Three request classes
+1. **`autoSign: true`** — BE emitted via `sign_calldata`; delegation already sufficient. Mini-app must execute silently via session key. **Do not prompt user.**
+2. **`autoSign: false`** — explicit confirmation required. `SigningRequestModal` + Privy smart-wallet client.
+3. **`auth` / `approve`** — separate handlers; drive `delegatedKey.start()` themselves.
 
-## Shared UI Atoms (post-2026-04-23 refactor)
-Prefer these over inline JSX — a handful of handlers previously duplicated
-full-screen layouts, spinners, and shield SVGs 5+ times each.
-
-- `components/atomics/spinner.tsx`
-  - `<Spinner size="xs|sm|md|lg" className?>` — inline spinner (default violet).
-  - `<LoadingSpinner />` — full-screen page loader.
-- `components/atomics/icons.tsx`
-  - `<ShieldIcon size? variant="violet|success" />` — gradient id is generated
-    with `useId()` so multiple shields co-exist without clashing.
-  - `<GoogleIcon />` — Google G mark.
-- `components/atomics/FullScreen.tsx`
-  - `<FullScreen>` — the `min-h-dvh bg-[#0f0f1a] px-6 gap-4` page wrapper.
-  - `<FullScreenLoading step? />` — centred spinner + optional step text.
-  - `<FullScreenError message showClose? />` — red centred message, optional
-    "Close" button that calls `Telegram.WebApp.close()`.
-  - `<FullScreenSuccess title subtitle? />` — post-success card with shield,
-    "Closing automatically" line. **Caller is responsible for triggering the
-    actual `Telegram.WebApp.close()`** — this component only renders UI.
-
-## Fetch Hook Convention
-`hooks/useFetch.ts` is the canonical auth'd-GET hook for JSON APIs.
-Accepts a nullable URL (returns idle when null/disabled), optional
-`transform(body)` for shape adaptation, and a user-facing `errorMessage`.
-`HomeTab` (portfolio) and `ConfigsTab` (permissions list) both use it —
-do not re-implement the fetch → `setLoading`/`setError`/`setData` dance
-inline.
-
-## Debug Log Interceptor (moved to hooks/)
-`hooks/useDebugEntries.ts` installs the `console.log` / `console.warn`
-monkey-patch at module load (captures only lines containing `[AEGIS:`,
-ring buffer cap 200). `DebugTab` renders the entries. Import the hook,
-not a "DebugLog component" — the latter was removed.
-
-## 2026-04-23 — ConfigsTab permissions field alignment
-`GrantPermission` type and `GrantRow` were reading `symbol` / `maxAmount` /
-`spent` off the `/delegation/grant` response, but the BE contract
-(`TokenDelegation` in `be/.../tokenDelegation.repo.ts`) uses `tokenSymbol`,
-`limitRaw`, `spentRaw`, `tokenDecimals`. The mismatch left the spending-limit
-cell rendering "—" for every grant. Renamed the FE fields to match, and
-`GrantRow` now scales `limitRaw` / `spentRaw` by `tokenDecimals` via BigInt
-before formatting (raw values are bigint strings over the wire, not
-human-readable amounts). **Convention**: when surfacing delegation rows, always
-divide `limitRaw`/`spentRaw` by `10 ** tokenDecimals` — never display raw.
-
-## 2026-04-23 — tab-switch refetch fix (global AppData store)
-`HomeTab` and `ConfigsTab` each called `useFetch` directly, so every tab switch
-unmounted the consumer and re-fired `GET /portfolio` / `GET /delegation/grant`.
-Hoisted both fetches into `src/hooks/useAppData.tsx`:
-- `AppDataProvider` wraps `StatusView`'s tab area (mounted once, survives tab
-  switches) and owns both `useFetch` calls.
-- Consumers call `usePortfolio()` / `useDelegations()` — same
-  `{ data, loading, error }` shape as `useFetch` so no call-site logic changed.
-- Parsers (`parsePortfolio`, `parseGrants`) and shared types (`PortfolioToken`,
-  `GrantPermission`) now live in `useAppData.tsx` as the single source of truth;
-  the per-tab copies were deleted.
-- `HomeTab` / `ConfigsTab` no longer take `backendUrl` or `privyToken` props —
-  they read from context.
-
-**Convention**: shared cross-tab backend data belongs in `AppDataProvider`.
-Add new endpoints by extending `AppData` + exposing a `useXxx()` selector;
-do not call `useFetch` inline in a tab that can be unmounted by `TabDock`.
-Refreshing after mutations (e.g. after `POST /delegation/grant` in
-`ApprovalOnboarding`) is **not** yet wired — provider lifetime ≈ one
-authenticated session; a `refetch()` on the resource is the right extension
-point when that becomes a requirement.
-
-## 2026-04-24 — SignHandler auto-sign race with key unlock
-**What**: `SignHandler` armed a 10s `AUTO_SIGN_TIMEOUT_MS` fallback whenever
-`serializedBlob` was null, without distinguishing "key is still being
-restored" from "no key available". On the /send flow, clicking the
-"Execute Automatically" mini-app button mounts `SignHandler` concurrently
-with `delegatedKey.unlock()` (async CloudStorage decrypt). If unlock was
-slower than the timer (slow TG webview, cold start), the handler flipped
-to `showManual = true` and the manual `SigningRequestModal` popped over
-the "Signing with your delegated key" loader — even though auto-sign had
-not actually failed.
-
-**Fix**: `SignHandler` now takes a `keyStatus: DelegationState['status']`
-prop (wired from `App.tsx`). The fallback timer only arms when
-`keyStatus !== 'processing'`; while the key machine is mid-unlock the
-handler waits indefinitely. Once unlock settles (`done` with blob →
-auto-sign; `idle`/`error` without blob → arm the 10s fallback as before).
-
-**Why this approach**: raising the timeout (option 2) just masks the
-race. Awaiting unlock in `App.tsx` before rendering `SignHandler`
-(option 3) delays paint and couples render ordering to a hook side
-effect. Gating on `keyStatus` keeps the handler self-contained and makes
-"still unlocking" vs. "truly missing" a first-class distinction.
-
-**Convention**: any handler that depends on `delegatedKey.serializedBlob`
-to auto-sign must also consume `delegatedKey.state.status` before
-falling back — never treat `blob === null` alone as a terminal state.
-`YieldDepositHandler` currently waits indefinitely on the blob (no
-fallback timer) so it is unaffected; if a fallback is ever added there,
-apply the same gate.
-
-## 2026-04-24 — SignHandler auto-sign failure handling (DO NOT REINTRODUCE MANUAL FALLBACK)
-
-**Expected behavior of the sign flow in the Mini App.** This was hard-won;
-re-adding the "fall back to manual modal" behavior will break debuggability
-and trap users in an unrecoverable signature prompt. Read before touching
-`SignHandler.tsx`, `YieldDepositHandler.tsx`, or any new handler that
-consumes `delegatedKey.serializedBlob`.
-
-### The three request classes
-
-1. **`autoSign: true`** — backend emitted via `sign_calldata` because token
-   delegation is already sufficient (`sendCapability.ts:198-216`). The Mini
-   App is expected to execute silently via the delegated session key. The
-   user must not be asked to sign.
-2. **`autoSign: false`** — backend wants explicit user confirmation (e.g.
-   confirmation-phase sends, approvals, actions outside delegation scope).
-   `SigningRequestModal` is the correct UI and uses Privy's smart-wallet
-   client (`client.sendTransaction`).
-3. **`auth` / `approve`** — separate handlers; they drive `delegatedKey.start()`
-   themselves and are unaffected by the rules below.
-
-### Rule 1: auto-sign failures MUST NOT pop the manual modal
-
-Before 2026-04-24, both `createSessionKeyClient` and `sendTransaction`
-errors in the auto-sign path called `setShowManual(true)`. This was wrong
-for three compounding reasons:
-
-- **Manual sign cannot recover.** Same smart account, same chain, same
-  paymaster config. If the session-key UserOp fails with `AA21` / paymaster
-  404 / insufficient prefund, the Privy-EOA UserOp will fail the same way.
-- **It hid the real error.** `autoSignError` was set but only rendered as a
-  tiny banner above the modal — behind Telegram's modal chrome on some
-  clients. Users (and agents) saw "please sign" and assumed the key was
-  broken, not the paymaster.
-- **Approving the manual modal actually submitted the same doomed UserOp**
-  (via `client.sendTransaction`), producing a second viem error dump and
-  masking the original failure in the logs.
-
-**Current behavior** (`SignHandler.tsx` — the `autoSignError && currentRequest.autoSign`
-branch): on auto-sign failure render a full-screen error view with
-- the raw error text (selectable, scrollable, copy button),
-- diagnostics (`bundler: set|MISSING`, `paymaster: set|MISSING`, `to`,
-  `value`, `dataLen`),
-- a Close button that rejects the request and closes the web-app only on
-  explicit tap.
-
-**Do not** re-wire auto-sign errors into `SigningRequestModal`. If you
-need richer error handling, extend the error view — don't swap it for a
-modal.
+### Rule 1: auto-sign failures MUST NOT pop manual modal
+Manual sign uses the same SCA + chain + paymaster — if session-key UserOp fails (AA21, paymaster 404, prefund), manual fails identically and submits a second doomed UserOp. Render a full-screen error view instead: raw error text (selectable, copyable), diagnostics (`bundler:set|MISSING`, `paymaster:set|MISSING`, `to`, `value`, `dataLen`), Close button.
 
 ### Rule 2: `SigningRequestModal` is only for `autoSign: false`
-
-The modal's `approve` handler uses `useSmartWallets().client.sendTransaction`,
-which submits via Privy's embedded-wallet flow and **does not attach our
-ZeroDev paymaster**. It is fine for user-confirmed flows where the user
-accepts gas semantics, but it is never a valid fallback for an auto-sign
-path that expects paymaster sponsorship.
-
-If you add a new sign-like handler, mirror this split:
-- `autoSign: true` → session-key client from `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)`.
-- `autoSign: false` → Privy smart-wallet client via `useSmartWallets()`.
+Modal uses `useSmartWallets().client.sendTransaction` (Privy EOA, no ZeroDev paymaster). Never a fallback for an auto-sign path expecting sponsorship. New handler split:
+- `autoSign: true` → `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)`.
+- `autoSign: false` → `useSmartWallets()`.
 
 ### Rule 3: ZeroDev v3 — bundler URL == paymaster URL
+Both `VITE_ZERODEV_RPC` and `VITE_PAYMASTER_URL` must be `https://rpc.zerodev.app/api/v3/<PROJECT_ID>/chain/<CHAIN_ID>`. Method name (`eth_sendUserOperation` vs `pm_getPaymasterStubData`) routes bundler vs paymaster on ZeroDev's side. **Do not invent a `/paymaster/` path segment** (404s with `Cannot POST /api/v3/paymaster/.../chain/...`). v2 used a different shape — we're on v3.
 
-`VITE_ZERODEV_RPC` and `VITE_PAYMASTER_URL` must be the **same endpoint**:
-`https://rpc.zerodev.app/api/v3/<PROJECT_ID>/chain/<CHAIN_ID>`. The
-JSON-RPC method name (`eth_sendUserOperation` vs `pm_getPaymasterStubData`)
-is what routes bundler vs paymaster on ZeroDev's side.
+### Rule 4: `autoSignError` must stay surfaced
+Never `setAutoSignError(null)` without also clearing `autoSignAttemptedRef.current`. Never render only as a toast/banner — must be in a copyable view (Telegram clips overlays). Log every failure with `[AEGIS:SignHandler]` prefix.
 
-Do not invent a `/paymaster/` path segment. A previous `.env` had
-`https://rpc.zerodev.app/api/v3/paymaster/<PROJECT>/chain/<CHAIN>`, which
-404s with `Cannot POST /api/v3/paymaster/.../chain/...`. If
-`pm_getPaymasterStubData` returns 404 HTML, the URL is malformed — not the
-paymaster project.
-
-(Legacy v2 paymasters use a different URL shape: `https://rpc.zerodev.app/api/v2/paymaster/<PROJECT>`.
-We are on v3; don't mix.)
-
-### Rule 4: `autoSignError` state must stay surfaced
-
-- Never `setAutoSignError(null)` as part of a "retry" flow without also
-  clearing `autoSignAttemptedRef.current`.
-- Never render `autoSignError` only as a toast/banner. It must be part of a
-  view the user can read and copy — Telegram webviews clip overlay banners.
-- Log every failure with the `[AEGIS:SignHandler]` prefix so
-  `useDebugEntries` captures it.
-
-### Rule 5: `serializedBlob === null` is not a terminal state
-
-Pair it with `delegatedKey.state.status`:
+### Rule 5: `serializedBlob === null` is not terminal
+Pair with `delegatedKey.state.status`:
 - `processing` → wait indefinitely (unlock in flight).
-- `idle` / `error` with no blob → genuine "no key"; arming the 10s fallback
-  is acceptable.
-- `done` with a blob → execute.
+- `idle`/`error` no blob → genuine "no key"; arming 10s fallback OK.
+- `done` with blob → execute.
 
-See the 2026-04-24 race-fix entry above. Any new auto-sign handler must
-take `keyStatus` as a prop from `App.tsx`.
+Any new auto-sign handler **must** take `keyStatus` as a prop from `App.tsx`.
 
-### Checklist before shipping a new sign-capable handler
-
-- [ ] `autoSign: true` path uses `createSessionKeyClient` with both
-      `ZERODEV_RPC` and `PAYMASTER_URL`.
+### Pre-ship checklist (new sign-capable handler)
+- [ ] `autoSign:true` path uses `createSessionKeyClient` with both `ZERODEV_RPC`+`PAYMASTER_URL`.
 - [ ] Auto-sign errors render a persistent error view, not a modal.
-- [ ] `autoSign: false` path uses `SigningRequestModal`.
-- [ ] Handler consumes `keyStatus` and waits on `processing`.
-- [ ] Debug logs use `[AEGIS:<HandlerName>]` prefix.
-- [ ] No hardcoded chain object / RPC in the handler — pull from
-      `crypto.ts` / env (and lift to a FE `chainConfig` when we add
-      multi-chain, per root CLAUDE.md).
+- [ ] `autoSign:false` path uses `SigningRequestModal`.
+- [ ] Consumes `keyStatus` and waits on `processing`.
+- [ ] Logs `[AEGIS:<HandlerName>]` prefix.
+- [ ] No hardcoded chain object/RPC — pull from `crypto.ts`/env (and lift to a FE `chainConfig` when multi-chain ships, per root CLAUDE.md).
+
+---
+
+## Known Invariants / Gotchas
+- Chain hard-coded to **Avalanche Fuji** in `crypto.ts`. Multi-chain support requires threading `chain` through `installSessionKey`, `createSessionKeyClient`, wallet/public clients.
+- Privy token refresh is the caller's responsibility — `usePrivyToken` fetches once on `authenticated` flip; long sessions may see stale tokens. Re-mount or call `getAccessToken()` if 401 bounces.
+- `useRequest` reads `requestId` once at mount. For chained swap steps, `SignHandler` uses `fetchNextRequest` directly — URL stays fixed.
+- `SmartWalletsProvider` must wrap `App`; `useSmartWallets()` throws otherwise.
+- No test runner — static stateless-routing regression guard deferred until vitest is added.
