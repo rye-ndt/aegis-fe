@@ -99,7 +99,7 @@ Responses: `POST {backendUrl}/response` via `postResponse()`. Shapes mirror requ
 ## Backend HTTP Endpoints (consumed)
 | Method & Path | Used by |
 | -------- | ------- |
-| `GET  /request/:requestId`              | `useRequest` |
+| `GET  /request/:requestId`              | `useRequest` (requires Privy `Authorization` except for `requestType === 'auth'`) |
 | `GET  /request/:requestId?after=<id>`   | `fetchNextRequest` (next queued step or 404) |
 | `POST /response`                         | `postResponse` |
 | `GET  /portfolio`                        | `AppDataProvider` (HomeTab) |
@@ -201,6 +201,9 @@ Auto-invokes `useFundWallet().fundWallet({ address: request.walletAddress, chain
 ---
 
 ## Feature Log
+
+### Endpoint auth hardening — `useRequest` (2026-04-25)
+`GET /request/:requestId` now requires `Authorization: Bearer <privyToken>` for `sign`/`approve` requests. `useRequest` pulls the token via `usePrivyToken()` and attaches it when non-null. The token is omitted on the first hit for `auth` requests (user has no token yet — BE keeps this endpoint unauthenticated for `auth`). 401/403 responses surface via `log.warn` (→ sonner toast). Token is never logged.
 
 ### Points / Loyalty (2026-04-25)
 Read-only Points tab: balance card, recent ledger activity (cursor-paginated), top-10 leaderboard.
