@@ -178,6 +178,18 @@ export function SignHandler({
         log.error('sendTransaction failed', { requestId: currentRequest.requestId, err: msg }, { toast: false });
         log.warn(interpreted.friendly, { requestId: currentRequest.requestId });
         if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
+        // Tell the BE the request failed AND why. The BE keys off `errorCode`
+        // to drive recovery flows (e.g. /buy nudge on insufficient_token_balance);
+        // without this it would just timeout the signing request and the user
+        // would see no contextual help in chat.
+        postResponse(backendUrl, {
+          requestId: currentRequest.requestId,
+          requestType: 'sign',
+          privyToken,
+          rejected: true,
+          errorCode: interpreted.code,
+          errorMessage: interpreted.friendly,
+        }).catch((e) => log.debug('postResponse(error) failed', { err: String(e) }));
         setAutoSignError(interpreted);
         return;
       }

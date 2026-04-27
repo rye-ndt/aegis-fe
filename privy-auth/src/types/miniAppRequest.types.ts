@@ -79,6 +79,10 @@ export interface SignResponse extends BaseResponse {
   requestType: 'sign';
   txHash?: string;
   rejected?: boolean;
+  // Set when sendTransaction failed (rejected=true). The BE branches on this
+  // to drive recovery flows (e.g. /buy nudge on insufficient_token_balance).
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 interface DelegationRecordDto {

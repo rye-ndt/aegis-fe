@@ -94,6 +94,7 @@ SignKind       = 'yield_deposit' | 'yield_withdraw'  // optional; routes to Yiel
 ```
 - `AuthRequest` → `{ telegramChatId }`
 - `SignRequest` → `{ to, value (wei dec string), data (0x), description, autoSign, kind?, chainId?, protocolId?, tokenAddress?, steps?, displayMeta? }`
+- `SignResponse` → `{ txHash? } | { rejected: true, errorCode?, errorMessage? }`. **Convention:** on `sendTransaction` failure, FE posts `rejected: true` with the `errorCode` from `interpretSignError` so the BE can drive recovery flows (e.g. `insufficient_token_balance` → /buy nudge in `notifyResolved`). Codes are stable strings; add new ones in lockstep with `SignErrorCode` in `interpretSignError.ts`.
 - `ApproveRequest` → `{ subtype, suggestedTokens?, reapproval?, tokenAddress?, amountRaw? }`
 - `OnrampRequest` → `{ amount, asset:'USDC', chainId, walletAddress }` (`walletAddress` is the SCA, **not** the EOA)
 
