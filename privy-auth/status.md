@@ -127,7 +127,7 @@ Three-step effect chain, each ref-guarded against StrictMode:
 
 ### `SignHandler`
 - `currentRequest` state initialised from prop; resyncs when parent passes a new `requestId`.
-- `autoSign === true`: build session client via `createSessionKeyClient` (cached in `sessionClientRef` across steps), `sendTransaction({ chain: null })`, POST `{ txHash }`. Then `fetchNextRequest(...)` — if next, reset `autoSignAttemptedRef` + `setCurrentRequest(next)`; on 404, close.
+- `autoSign === true`: build session client via `createSessionKeyClient` (cached in `sessionClientRef` across steps), `sendTransaction({ chain: null })` wrapped in `trackInFlightBroadcast` (see "Broadcast dedupe" below), POST `{ txHash }`. Then `fetchNextRequest(...)` — if next, reset `autoSignAttemptedRef` + `setCurrentRequest(next)`; on 404, close.
 - Manual fallback (`autoSign:false`, or 10s timer with `keyStatus !== 'processing'`): render `<SigningRequestModal />`. Approve uses `useSmartWallets().client.sendTransaction` (Privy EOA path, no paymaster).
 - Reject → POST `{ rejected: true }` + close.
 - Takes `keyStatus` prop; only arms 10s fallback when not `processing` (see Rule 5 below).
@@ -305,6 +305,15 @@ Pair with `delegatedKey.state.status`:
 - `done` with blob → execute.
 
 Any new auto-sign handler **must** take `keyStatus` as a prop from `App.tsx`.
+
+### Rule 6: Broadcast dedupe is two-layered — both required
+A signing payload `(to, value, data)` can arrive twice for one user intent (BE re-emits `sign_calldata` after a `waitFor` timeout, agent loops, FE effect re-fires on swap, StrictMode double-mount). Without dedupe, the first send mines + drains the wallet and the second send's bundler-side gas estimation reverts with `ERC20: transfer amount exceeds balance` — surfaced as a spurious error toast over a successful tx.
+
+Two layers in `utils/recentBroadcasts.ts`:
+- `trackInFlightBroadcast(to, value, data, send)` — in-memory `Map<payloadKey, Promise<hash>>`. Coalesces *concurrent* sends within the tab. Always wrap `sessionClient.sendTransaction` in this for auto-sign paths.
+- `findRecentBroadcast(...)` + `recordBroadcast(...)` — localStorage, 10min TTL. Catches *post-completion* duplicates across reloads.
+
+Order in handler: check `findRecentBroadcast` first (reuse hash, skip send); else `trackInFlightBroadcast(...)` to do the send. `recordBroadcast` is called by `trackInFlightBroadcast` on success — do not call it directly.
 
 ### Pre-ship checklist (new sign-capable handler)
 - [ ] `autoSign:true` path uses `createSessionKeyClient` with both `ZERODEV_RPC`+`PAYMASTER_URL`.

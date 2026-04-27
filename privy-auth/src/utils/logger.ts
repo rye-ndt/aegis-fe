@@ -24,18 +24,22 @@ function fmt(scope: string, msg: string, ctx?: unknown) {
 }
 function safeJson(v: unknown) { try { return JSON.stringify(v); } catch { return String(v); } }
 
+type LogOpts = { toast?: boolean };
+
 export function createLogger(scope: string) {
   return {
     debug(msg: string, ctx?: unknown) { if (enabled('debug')) console.log(fmt(scope, msg, ctx)); },
     info (msg: string, ctx?: unknown) { if (enabled('info'))  console.log(fmt(scope, msg, ctx)); },
-    warn (msg: string, ctx?: unknown) {
+    warn (msg: string, ctx?: unknown, opts?: LogOpts) {
       if (!enabled('warn')) return;
       console.warn(fmt(scope, msg, ctx));
+      if (opts?.toast === false) return;
       toast.warning(msg, { description: ctx === undefined ? scope : `${scope} — ${safeJson(ctx)}` });
     },
-    error(msg: string, ctx?: unknown) {
+    error(msg: string, ctx?: unknown, opts?: LogOpts) {
       if (!enabled('error')) return;
       console.error(fmt(scope, msg, ctx));
+      if (opts?.toast === false) return;
       toast.error(msg, { description: ctx === undefined ? scope : `${scope} — ${safeJson(ctx)}` });
     },
   };

@@ -111,7 +111,6 @@ export async function installSessionKey(
   signerAddress: `0x${string}`,
   sessionPrivateKey: `0x${string}`,
   sessionKeyAddress: `0x${string}`,
-  bundlerRpc: string,
 ): Promise<string> {
   const chain = getChain();
 

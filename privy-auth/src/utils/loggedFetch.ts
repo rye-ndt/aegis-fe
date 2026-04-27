@@ -17,13 +17,16 @@ export async function loggedFetch(url: string, init?: RequestInit): Promise<Resp
     let display: string;
     try { display = JSON.stringify(JSON.parse(text)); } catch { display = text; }
     if (!r.ok) {
-      log.warn(`← ${r.status} ${display}`);
+      // Don't auto-toast — the caller decides whether a non-2xx is a real
+      // error or expected (e.g. 404 on a stale requestId ack). They will
+      // log.error themselves if it warrants a user-visible toast.
+      log.warn(`← ${r.status} ${display}`, undefined, { toast: false });
     } else {
       log.debug(`← ${r.status} ${display}`);
     }
   } catch {
     if (!r.ok) {
-      log.warn(`← ${r.status}`);
+      log.warn(`← ${r.status}`, undefined, { toast: false });
     } else {
       log.debug(`← ${r.status}`);
     }

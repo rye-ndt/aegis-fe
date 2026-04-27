@@ -10,6 +10,8 @@ import { Spinner } from '../atomics/spinner';
 import { ShieldIcon } from '../atomics/icons';
 import type { DelegationState } from '../../hooks/useDelegatedKey';
 import { createLogger } from '../../utils/logger';
+import { interpretSignError, type InterpretedError } from '../../utils/interpretSignError';
+import { findRecentBroadcast, trackInFlightBroadcast } from '../../utils/recentBroadcasts';
 
 const log = createLogger('SignHandler');
 
@@ -41,7 +43,7 @@ export function SignHandler({
   const [currentRequest, setCurrentRequest] = React.useState<SignRequest>(initialRequest);
   const [showManual, setShowManual] = React.useState(!initialRequest.autoSign);
   const [done, setDone] = React.useState(false);
-  const [autoSignError, setAutoSignError] = React.useState<string | null>(null);
+  const [autoSignError, setAutoSignError] = React.useState<InterpretedError | null>(null);
   const autoSignAttemptedRef = React.useRef(false);
   // Cache the session client across swap steps to avoid re-paying init cost.
   const sessionClientRef = React.useRef<SessionClient | null>(null);
@@ -81,6 +83,7 @@ export function SignHandler({
   // Auto-sign: fire once per currentRequest; re-runs when currentRequest changes
   // (i.e. when next swap step arrives). Falls back to manual after timeout.
   React.useEffect(() => {
+    if (done) return;
     if (!currentRequest.autoSign || autoSignAttemptedRef.current) return;
 
     if (!serializedBlob) {
@@ -122,49 +125,110 @@ export function SignHandler({
           log.debug('session client built', { account: sessionClient.account?.address });
         } catch (err) {
           const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-          log.error('createSessionKeyClient failed', { requestId: currentRequest.requestId, err: msg });
+          const interpreted = interpretSignError(err);
+          log.error('createSessionKeyClient failed', { requestId: currentRequest.requestId, err: msg }, { toast: false });
+          log.warn(interpreted.friendly, { requestId: currentRequest.requestId });
           if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
-          setAutoSignError(`createSessionKeyClient: ${msg}`);
+          setAutoSignError(interpreted);
           return;
         }
       }
 
+      // Payload-level dedupe: if this exact (to, value, data) was already
+      // broadcast from this device within the TTL, do NOT re-broadcast.
+      // Reason: when the BE fails to ack a successful tx and re-issues the
+      // request under a fresh requestId, we'd otherwise drain the user's
+      // balance by signing the same operation again. The chain is the source
+      // of truth; reuse the cached hash and proceed to ack/close.
+      const dedupeHit = findRecentBroadcast(
+        currentRequest.to,
+        currentRequest.value,
+        currentRequest.data,
+      );
+      let hash: `0x${string}`;
+      if (dedupeHit) {
+        log.warn(
+          'duplicate-payload — reusing prior broadcast instead of re-sending',
+          { requestId: currentRequest.requestId, hash: dedupeHit.hash, ageMs: Date.now() - dedupeHit.ts },
+          { toast: false },
+        );
+        hash = dedupeHit.hash as `0x${string}`;
+      } else {
       try {
-        const hash = await sessionClient.sendTransaction({
-          to: currentRequest.to as `0x${string}`,
-          value: BigInt(currentRequest.value),
-          data: currentRequest.data as `0x${string}`,
-          account: sessionClient.account!,
-          chain: null,
-        });
-        log.info('step', { step: 'submitted', requestId: currentRequest.requestId, hash });
-        await reportTxHash(hash);
-
-        // Before closing, check if the backend has queued a next step.
-        let nextRequest: Awaited<ReturnType<typeof fetchNextRequest>> = null;
-        try {
-          nextRequest = await fetchNextRequest(backendUrl, currentRequest.requestId, privyToken);
-        } catch (err) {
-          log.warn('fetchNextRequest failed', { requestId: currentRequest.requestId, err: String(err) });
-        }
-
-        if (nextRequest && nextRequest.requestType === 'sign') {
-          log.info('next swap step found', { requestId: nextRequest.requestId });
-          autoSignAttemptedRef.current = false;
-          setCurrentRequest(nextRequest as SignRequest);
-        } else {
-          log.info('step', { step: 'succeeded', requestId: currentRequest.requestId });
-          setDone(true);
-          setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
-        }
+        // trackInFlightBroadcast coalesces concurrent sends of the same
+        // (to, value, data) within this tab. Prevents a second userOp from
+        // being submitted when StrictMode/effect-rerun/BE-re-emit fires while
+        // the first send is still in flight — without this, both attempts
+        // race past findRecentBroadcast (which only sees *completed* sends).
+        hash = await trackInFlightBroadcast(
+          currentRequest.to,
+          currentRequest.value,
+          currentRequest.data,
+          () => sessionClient!.sendTransaction({
+            to: currentRequest.to as `0x${string}`,
+            value: BigInt(currentRequest.value),
+            data: currentRequest.data as `0x${string}`,
+            account: sessionClient!.account!,
+            chain: null,
+          }),
+        );
       } catch (err) {
         const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-        log.error('sendTransaction failed', { requestId: currentRequest.requestId, err: msg });
+        const interpreted = interpretSignError(err);
+        log.error('sendTransaction failed', { requestId: currentRequest.requestId, err: msg }, { toast: false });
+        log.warn(interpreted.friendly, { requestId: currentRequest.requestId });
         if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
-        setAutoSignError(`sendTransaction: ${msg}`);
+        setAutoSignError(interpreted);
+        return;
+      }
+      }
+
+      log.info('step', { step: 'submitted', requestId: currentRequest.requestId, hash });
+
+      // Best-effort: ack the txHash to the backend. The chain is already source
+      // of truth — if this fails (e.g. 404 because the request cache expired),
+      // log it but still treat the operation as successful.
+      try {
+        await reportTxHash(hash);
+      } catch (err) {
+        log.warn(
+          'reportTxHash failed (tx already on-chain)',
+          { requestId: currentRequest.requestId, hash, err: String(err) },
+          { toast: false },
+        );
+      }
+
+      // Before closing, check if the backend has queued a next step.
+      let nextRequest: Awaited<ReturnType<typeof fetchNextRequest>> = null;
+      try {
+        nextRequest = await fetchNextRequest(backendUrl, currentRequest.requestId, privyToken);
+      } catch (err) {
+        log.warn(
+          'fetchNextRequest failed',
+          { requestId: currentRequest.requestId, err: String(err) },
+          { toast: false },
+        );
+      }
+
+      if (
+        nextRequest &&
+        nextRequest.requestType === 'sign' &&
+        nextRequest.requestId !== currentRequest.requestId
+      ) {
+        // Same-id "next" means the BE didn't clean up after our /response
+        // (e.g. signingRequestCache miss). Treat as no-next and close —
+        // otherwise we re-fire auto-sign on the same payload and POST
+        // /response in a hot loop, hammering the BE.
+        log.info('next swap step found', { requestId: nextRequest.requestId });
+        autoSignAttemptedRef.current = false;
+        setCurrentRequest(nextRequest as SignRequest);
+      } else {
+        log.info('step', { step: 'succeeded', requestId: currentRequest.requestId });
+        setDone(true);
+        setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
       }
     })();
-  }, [currentRequest, serializedBlob, keyStatus, reportTxHash, backendUrl, privyToken]);
+  }, [currentRequest, serializedBlob, keyStatus, reportTxHash, backendUrl, privyToken, done]);
 
   if (done) {
     return (
@@ -183,7 +247,7 @@ export function SignHandler({
   // swapping the view to a modal hides the error text behind TG UI chrome.
   if (autoSignError && currentRequest.autoSign) {
     const copy = () => {
-      navigator.clipboard?.writeText(autoSignError).catch(() => {});
+      navigator.clipboard?.writeText(autoSignError.raw).catch(() => {});
     };
     return (
       <FullScreen>
@@ -191,18 +255,18 @@ export function SignHandler({
           <div className="flex flex-col items-center gap-2">
             <div className="text-4xl">⚠️</div>
             <p className="text-white font-semibold text-lg">Auto-sign failed</p>
-            <p className="text-xs text-white/50 text-center">
-              The delegated key could not execute this transaction.
+            <p className="text-sm text-white/80 text-center">
+              {autoSignError.friendly}
             </p>
           </div>
-          <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-left">
-            <p className="text-[10px] font-semibold tracking-widest text-white/30 uppercase mb-1">
-              Error
+          <details className="bg-white/5 border border-white/10 rounded-lg p-3 text-left">
+            <summary className="text-[10px] font-semibold tracking-widest text-white/30 uppercase cursor-pointer select-none">
+              Technical details
+            </summary>
+            <p className="mt-2 text-xs text-red-200 break-all whitespace-pre-wrap select-text max-h-64 overflow-auto">
+              {autoSignError.raw}
             </p>
-            <p className="text-xs text-red-200 break-all whitespace-pre-wrap select-text max-h-64 overflow-auto">
-              {autoSignError}
-            </p>
-          </div>
+          </details>
           <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-left text-xs text-white/60 space-y-1">
             <div>bundler: {BUNDLER_URL ? 'set' : 'MISSING'}</div>
             <div>paymaster: {PAYMASTER_URL ? 'set' : 'MISSING'}</div>
@@ -267,7 +331,7 @@ export function SignHandler({
     <>
       {autoSignError && (
         <div className="fixed top-2 left-2 right-2 z-50 bg-red-500/10 border border-red-500/30 text-red-200 text-xs p-2 rounded">
-          Auto-sign failed — please approve manually. ({autoSignError})
+          Auto-sign failed — please approve manually. ({autoSignError.friendly})
         </div>
       )}
     <SigningRequestModal
