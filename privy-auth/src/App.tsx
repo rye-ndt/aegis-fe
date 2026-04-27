@@ -168,7 +168,7 @@ export default function App() {
 
   return (
     <>
-      <Toaster position="top-center" richColors closeButton theme="dark" />
+      <Toaster position="top-center" richColors closeButton theme="dark" duration={30000} />
       {content}
     </>
   );

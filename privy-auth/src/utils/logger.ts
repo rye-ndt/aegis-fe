@@ -31,12 +31,12 @@ export function createLogger(scope: string) {
     warn (msg: string, ctx?: unknown) {
       if (!enabled('warn')) return;
       console.warn(fmt(scope, msg, ctx));
-      toast.warning(msg, { description: scope });
+      toast.warning(msg, { description: ctx === undefined ? scope : `${scope} — ${safeJson(ctx)}` });
     },
     error(msg: string, ctx?: unknown) {
       if (!enabled('error')) return;
       console.error(fmt(scope, msg, ctx));
-      toast.error(msg, { description: scope });
+      toast.error(msg, { description: ctx === undefined ? scope : `${scope} — ${safeJson(ctx)}` });
     },
   };
 }
