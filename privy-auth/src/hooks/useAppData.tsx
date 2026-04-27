@@ -38,12 +38,17 @@ export type YieldPositionsData = {
   };
 };
 
+export type UserProfile = {
+  pendingFlushed: number;
+};
+
 type Resource<T> = { data: T | null; loading: boolean; error: string | null };
 
 type AppData = {
   portfolio: Resource<PortfolioToken[]>;
   delegations: Resource<GrantPermission[]>;
   yieldPositions: Resource<YieldPositionsData>;
+  userProfile: Resource<UserProfile>;
   backendUrl: string;
   privyToken: string;
 };
@@ -67,6 +72,11 @@ function parseGrants(body: unknown): GrantPermission[] {
     data.permissions ??
     data.items ??
     (Array.isArray(body) ? body : [])) as GrantPermission[];
+}
+
+function parseUserProfile(body: unknown): UserProfile {
+  const data = (body ?? {}) as Record<string, unknown>;
+  return { pendingFlushed: typeof data.pendingFlushed === 'number' ? data.pendingFlushed : 0 };
 }
 
 function parseYieldPositions(body: unknown): YieldPositionsData {
@@ -123,8 +133,17 @@ export function AppDataProvider({
     },
   );
 
+  const userProfile = useFetch<UserProfile>(
+    privyToken && backendUrl ? `${backendUrl}/me` : null,
+    {
+      headers: authHeaders,
+      transform: parseUserProfile,
+      errorMessage: 'Could not load profile',
+    },
+  );
+
   const value = React.useMemo<AppData>(
-    () => ({ portfolio, delegations, yieldPositions, backendUrl, privyToken }),
+    () => ({ portfolio, delegations, yieldPositions, userProfile, backendUrl, privyToken }),
     [
       portfolio.data,
       portfolio.loading,
@@ -135,6 +154,9 @@ export function AppDataProvider({
       yieldPositions.data,
       yieldPositions.loading,
       yieldPositions.error,
+      userProfile.data,
+      userProfile.loading,
+      userProfile.error,
       backendUrl,
       privyToken,
     ],
@@ -152,6 +174,7 @@ function useAppData(): AppData {
 export const usePortfolio = () => useAppData().portfolio;
 export const useDelegations = () => useAppData().delegations;
 export const useYieldPositions = () => useAppData().yieldPositions;
+export const useUserProfile = () => useAppData().userProfile;
 export const useAppConfig = () => {
   const { backendUrl, privyToken } = useAppData();
   return { backendUrl, privyToken };

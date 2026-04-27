@@ -24,3 +24,13 @@ export function getRpcUrl(): string {
   if (!url) throw new Error('VITE_CHAIN_RPC_URL is not set');
   return url;
 }
+
+export function buildExplorerUrl(chainId: number, txHash: string): string {
+  const chain = CHAIN_REGISTRY[chainId];
+  const baseUrl = chain?.blockExplorers?.default?.url ?? 'https://snowtrace.io';
+  return `${baseUrl}/tx/${txHash}`;
+}
+
+export function chainName(chainId: number): string {
+  return CHAIN_REGISTRY[chainId]?.name ?? `Chain ${chainId}`;
+}

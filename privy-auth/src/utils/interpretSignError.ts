@@ -10,6 +10,9 @@ export type SignErrorCode =
   | 'sponsorship_unavailable'
   | 'session_key_invalid'
   | 'nonce_invalid'
+  | 'swap_amount_too_small'
+  | 'swap_amount_too_large'
+  | 'swap_no_liquidity'
   | 'user_rejected'
   | 'timeout'
   | 'rate_limited'
@@ -52,6 +55,26 @@ const PATTERNS: Array<{ test: RegExp; friendly: string; code: SignErrorCode }> =
     test: /insufficient allowance|45524332303a20696e73756666696369656e7420616c6c6f77616e6365/i,
     friendly: 'Token spending allowance is too low. Please approve more and try again.',
     code: 'insufficient_allowance',
+  },
+  {
+    // Relay solver — amount below the per-route minimum. The hex form is what
+    // viem surfaces from `Error(string)` reverts when ABI decoding doesn't run.
+    // Hex "51554f54455f535741505f414d4f554e545f544f4f5f534d414c4c" = "QUOTE_SWAP_AMOUNT_TOO_SMALL".
+    test: /QUOTE_SWAP_AMOUNT_TOO_SMALL|51554f54455f535741505f414d4f554e545f544f4f5f534d414c4c/i,
+    friendly: 'Swap amount is too small for this route. Try a larger amount (typically at least a few dollars).',
+    code: 'swap_amount_too_small',
+  },
+  {
+    // Hex "51554f54455f535741505f414d4f554e545f544f4f5f4c41524745" = "QUOTE_SWAP_AMOUNT_TOO_LARGE".
+    test: /QUOTE_SWAP_AMOUNT_TOO_LARGE|51554f54455f535741505f414d4f554e545f544f4f5f4c41524745/i,
+    friendly: 'Swap amount is too large for this route. Try a smaller amount.',
+    code: 'swap_amount_too_large',
+  },
+  {
+    // Hex "4e4f5f4c4951554944495459" = "NO_LIQUIDITY".
+    test: /NO_LIQUIDITY|4e4f5f4c4951554944495459/i,
+    friendly: 'No liquidity available for this swap route right now. Please try again later or pick a different token.',
+    code: 'swap_no_liquidity',
   },
   {
     test: /AA23 reverted|signature error/i,

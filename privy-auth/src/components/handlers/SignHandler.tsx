@@ -232,6 +232,15 @@ export function SignHandler({
         // otherwise we re-fire auto-sign on the same payload and POST
         // /response in a hot loop, hammering the BE.
         log.info('next swap step found', { requestId: nextRequest.requestId });
+        // Drop the cached KernelAccountClient before signing the next step.
+        // The deserialized permission account carries internal state (nonce
+        // key, validator/permission resolution) that becomes stale after a
+        // userOp lands; reusing it for a second sendTransaction reverts during
+        // simulation with `0xe52970aa`. Re-running createSessionKeyClient is
+        // cheap (one decrypt + a few RPCs) and matches the old per-step
+        // open/close behaviour. Scope: this branch only — single-step flows
+        // (/send, /yield single-tx) never reach here, so they are unaffected.
+        sessionClientRef.current = null;
         autoSignAttemptedRef.current = false;
         setCurrentRequest(nextRequest as SignRequest);
       } else {

@@ -1,5 +1,29 @@
 # Privy Auth Mini-App — Status Log
 
+## interpretSignError — Relay solver revert classification — 2026-04-27
+
+**What was done:**
+- Added three patterns to `interpretSignError.ts` for Relay solver `Error(string)` reverts: `QUOTE_SWAP_AMOUNT_TOO_SMALL`, `QUOTE_SWAP_AMOUNT_TOO_LARGE`, `NO_LIQUIDITY`. Each matches both the ASCII form and the hex-encoded form (viem surfaces revert data unparsed when the ABI isn't loaded).
+- Added matching `SignErrorCode` enum entries: `swap_amount_too_small`, `swap_amount_too_large`, `swap_no_liquidity`.
+
+**Why:**
+- Small-amount swaps via /swap (e.g. `$1`) fail at simulation with the solver's `QUOTE_SWAP_AMOUNT_TOO_SMALL` revert. Without classification the user saw a generic "Something went wrong" toast and the BE chat showed only "❌ Swap aborted at step 1/1" — no actionable hint that the amount is the problem.
+- Now the user sees "Swap amount is too small for this route. Try a larger amount (typically at least a few dollars)." in both the mini-app error screen and Telegram chat (via `notifyResolved`'s `errorMessage` passthrough).
+
+**Scope:** FE-only error classification. Doesn't change which transactions are sent — only how reverts are explained. No effect on /send, /yield, or the swap's success path.
+
+## SignHandler — fix stale session client across chained steps — 2026-04-27
+
+**What was done:**
+- In `SignHandler.tsx`, when chaining to the next swap step via `fetchNextRequest`, clear `sessionClientRef.current = null` before `setCurrentRequest(...)`. The next auto-sign effect re-builds a fresh `KernelAccountClient` via `createSessionKeyClient`.
+
+**Why:**
+- The cached `KernelAccountClient` (intended to "avoid re-paying init cost across swap steps") carries internal state from `deserializePermissionAccount` — nonce key, validator/permission resolution. Reusing the same object for a second `sendTransaction` after the first userOp is mined leads to a simulation revert with `0xe52970aa` (a Kernel/permissions error not in the `interpretSignError` table, so it surfaces as `errorCode: "unknown"`). Symptom: step 1 of a /swap succeeds, step 2 reverts during simulation; FE posts a generic rejection and the BE aborts the swap at step 2/2.
+- Re-running `createSessionKeyClient` is cheap (one decrypt + a few RPCs) and matches the OLD per-step open/close behavior of the mini app, where each step automatically got a fresh client.
+
+**Scope / blast radius:**
+- Only affects the chained-next branch (multi-step flows like /swap and /yield). Single-step flows (/send, single-tx /yield) never enter that branch and therefore see no change.
+
 ## Overview
 Telegram Mini App (TMA) for **Aegis**, an onchain AI agent. Handles Privy auth (Google + Telegram auto-login), ERC-4337 smart-wallet provisioning, ZeroDev session-key delegation, and a typed request/response bridge to the Aegis backend. Runs inside Telegram WebView; degrades to a normal browser session for dev.
 
@@ -114,6 +138,8 @@ Responses: `POST {backendUrl}/response` via `postResponse()`. Shapes mirror requ
 | `GET  /loyalty/balance`                  | `useLoyaltyBalance` |
 | `GET  /loyalty/history?limit=&cursorCreatedAtEpoch=` | `useLoyaltyHistory` |
 | `GET  /loyalty/leaderboard?limit=`       | `useLoyaltyLeaderboard` (no auth header) |
+| `GET  /me`                               | `useUserProfile` — returns `{ pendingFlushed: number }` (one-shot; BE clears after first serve) |
+| `GET  /notifications?kind=&limit=`       | `useNotifications` — returns `{ items: NotificationItem[] }` |
 
 All authed calls send `Authorization: Bearer ${privyToken}`. 404/410 on `/request/:id` → "not found" / "expired".
 
@@ -273,6 +299,21 @@ FE was reading `symbol`/`maxAmount`/`spent` but BE (`TokenDelegation`) emits `to
 - `atomics/spinner.tsx`: `<Spinner size="xs|sm|md|lg" />`, `<LoadingSpinner />`.
 - `atomics/icons.tsx`: `<ShieldIcon size? variant="violet|success">` (gradient id via `useId()`), `<GoogleIcon />`.
 - `atomics/FullScreen.tsx`: `<FullScreen>`, `<FullScreenLoading step?>`, `<FullScreenError message showClose?>`, `<FullScreenSuccess title subtitle?>` — caller still calls `.close()` itself.
+
+### Recipient notifications — activity feed (2026-04-27)
+**What:** Added read-only "Recent Transfers" section to `HomeTab` surfacing inbound p2p transfers via a new `GET /notifications?kind=p2p_send&limit=20` endpoint. Also shows a one-shot welcome banner when the BE flushes pending notifications after `/start`.
+- New hook `src/hooks/useNotifications.ts` (`useNotifications`) — wraps `useFetch` with auth headers from `useAppConfig()`. Returns `{ items, loading, error }`.
+- New type `NotificationItem` exported from `useNotifications.ts`.
+- `src/utils/chainConfig.ts` extended with `buildExplorerUrl(chainId, txHash)` and `chainName(chainId)` — use these; never inline chain IDs or explorer URLs.
+- `src/hooks/useAppData.tsx` extended with `UserProfile` type (`{ pendingFlushed: number }`), a `useFetch` for `GET /me`, and new selector `useUserProfile()`. `pendingFlushed` field is one-shot (BE clears after serving); cached only in component state, not localStorage.
+- `src/components/HomeTab.tsx` — added `RecentTransfers` section (after `YieldPositions`), `NotificationRow` component, and dismissable welcome flush banner. Logger scopes: `homeTab` and `notificationRow`.
+
+**Why:** Delivery is entirely via the Telegram bot; the Mini App is secondary surfacing for "who paid me" history. No SSE/push needed — simple `useFetch` on mount covers v1.
+
+**New conventions:**
+- Any future "things that happened *to* the user" feature should extend the `recipientNotifications` table on BE and add a new `kind` filter to `useNotifications` — not a new endpoint.
+- New client log metadata field: `count` (number of fetched notification items in a batch).
+- `buildExplorerUrl` / `chainName` live in `utils/chainConfig.ts` — extend there for new chains.
 
 ---
 
