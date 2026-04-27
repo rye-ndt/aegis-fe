@@ -1,4 +1,5 @@
 import React from 'react';
+import { usePrivy } from '@privy-io/react-auth';
 import type { MiniAppRequest } from '../types/miniAppRequest.types';
 import { usePrivyToken } from './privy';
 import { loggedFetch } from '../utils/loggedFetch';
@@ -13,16 +14,24 @@ export function useRequest(backendUrl: string): {
   error: string | null;
 } {
   const requestId = new URLSearchParams(window.location.search).get('requestId');
+  const { ready, authenticated } = usePrivy();
   const privyToken = usePrivyToken();
   const [request, setRequest] = React.useState<MiniAppRequest | null>(null);
   const [loading, setLoading] = React.useState(!!requestId);
   const [error, setError] = React.useState<string | null>(null);
+  const fetchedRef = React.useRef(false);
 
   React.useEffect(() => {
     if (!requestId || !backendUrl) {
       setLoading(false);
       return;
     }
+    if (!ready) return;
+    // If authenticated, wait until the access token has resolved before firing,
+    // otherwise the backend will reject the request as unauthorized.
+    if (authenticated && !privyToken) return;
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
 
     log.debug('fetching request', { requestId });
 
@@ -54,7 +63,7 @@ export function useRequest(backendUrl: string): {
         setError(msg);
         setLoading(false);
       });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ready, authenticated, privyToken, requestId, backendUrl]);
 
   return { requestId, request, loading, error };
 }

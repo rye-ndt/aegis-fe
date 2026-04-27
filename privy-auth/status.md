@@ -9,7 +9,7 @@ Telegram Mini App (TMA) for **Aegis**, an onchain AI agent. Handles Privy auth (
 - `@tma.js/sdk-react` (dynamic-imported in `TelegramAutoLogin`)
 - `viem` + `permissionless` ^0.2
 - ZeroDev Kernel v3.1 + EntryPoint 0.7 (`@zerodev/sdk`, `@zerodev/ecdsa-validator`, `@zerodev/permissions`)
-- Avalanche Fuji (43113) — hard-coded in `src/utils/crypto.ts`
+- Avalanche C-Chain mainnet (43114) by default; resolved at runtime via `src/utils/chainConfig.ts` (`VITE_CHAIN_ID`). Fuji (43113) still supported for testing.
 - Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.*`)
 - Vite + `vite-plugin-node-polyfills` (only `buffer`); `@solana/kit`, `@solana-program/system`, `@solana-program/token` external; `permissionless` must stay bundled.
 
@@ -61,11 +61,14 @@ Planning docs under `constructions/` are historical, not source-of-truth.
 | -------- | ------- |
 | `VITE_PRIVY_APP_ID` | Privy application ID |
 | `VITE_BACKEND_URL`  | Backend HTTP API base URL (no trailing slash) |
-| `VITE_ZERODEV_RPC`  | ZeroDev bundler RPC (also paymaster — same URL) |
-| `VITE_PAYMASTER_URL`| ZeroDev paymaster RPC — enables gas sponsorship |
+| `VITE_CHAIN_ID`     | EVM chain ID for session-key ops (default `43114` — Avalanche mainnet) |
+| `VITE_CHAIN_RPC_URL` | Standard JSON-RPC for the chain — used by `publicClient` for `eth_call`/`eth_getCode` against kernel factory & validators. **Must NOT be a bundler-only endpoint** (bundler revert envelopes crash viem with `revertError.cause.data.match`). Pimlico's `/v2/<chainId>/rpc` works (it proxies standard RPC too). |
+| `VITE_PIMLICO_BUNDLER_URL`  | Pimlico bundler RPC (`https://api.pimlico.io/v2/<chainId>/rpc?apikey=…`) |
+| `VITE_PIMLICO_PAYMASTER_URL`| Pimlico paymaster RPC — enables gas sponsorship (same URL as bundler is fine) |
+| `VITE_PIMLICO_SPONSORSHIP_POLICY_ID` | Pimlico policy id (e.g. `sp_xxx`) — passed to `getPaymasterData/StubData` so the configured policy actually applies. Without it, paymaster falls back to the project default. |
 | `VITE_LOG_LEVEL`    | `debug` \| `info` (default) \| `warn` \| `error` |
 
-All read via `import.meta.env`, narrowed with `?? ''`. No `.env.example`.
+All read via `import.meta.env`, narrowed with `?? ''`. See `.env.example`.
 
 ## Entry Wiring (`main.tsx`)
 - Calls `Telegram.WebApp.ready()`, `.expand()`, header/background `#0f0f1a` **before** React mounts.
@@ -156,7 +159,8 @@ Auto-invokes `useFundWallet().fundWallet({ address: request.walletAddress, chain
 - AES-GCM blob: `[16 salt][12 iv][ciphertext]`, PBKDF2-SHA256 @ 100k iters. Use `encryptBlob`/`decryptBlob` only.
 - Install path: `privy embedded provider → viem WalletClient → toOwner → signerToEcdsaValidator → toECDSASigner(empty addr) → toPermissionValidator({ policies:[toSudoPolicy({})] }) → createKernelAccount({ plugins:{sudo,regular} }) → serializePermissionAccount(account, sessionPrivateKey)`.
 - **Serialized blob contains the session private key.** Store only in (encrypted) CloudStorage. **Never** send to backend.
-- `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)` paymaster: pass URL → sponsored client; omit → SCA pays.
+- `createSessionKeyClient(blob, BUNDLER_URL, PAYMASTER_URL)` paymaster: pass URL → Pimlico-sponsored client; omit → SCA pays. Uses `createPimlicoClient` with EntryPoint 0.7 + gas oracle hook.
+- Chain is driven by `getChain()` from `utils/chainConfig.ts` (reads `VITE_CHAIN_ID`). Do not pass `chain` as a parameter — it is resolved internally. **Add new chains to `chainConfig.ts`, not inline.**
 
 ## Styling Conventions
 - BG: `bg-[#0f0f1a]` full-screen; `bg-[#161624]` / `#16162a` cards; `bg-white/5` / `bg-white/[0.04]` rows.
@@ -201,6 +205,24 @@ Auto-invokes `useFundWallet().fundWallet({ address: request.walletAddress, chain
 ---
 
 ## Feature Log
+
+### Mainnet default + FE chainConfig extraction (2026-04-27)
+**What:** Extracted chain resolution out of `crypto.ts` into `utils/chainConfig.ts` (a small registry keyed by chain id). `crypto.ts` now imports `getChain()`. Backend default `CHAIN_ID` flipped from `43113` → `43114`; backend `chainConfig.ts` no longer carries the dead `bundlerUrl`/`paymasterUrl` fields (Pimlico lives in the FE). Drizzle seeds (`tokenRegistry.ts`, `transferToken.ts`) are now CHAIN_ID-driven with both mainnet and Fuji token tables.
+**Why:** Inline chain switch in `crypto.ts` violated CLAUDE.md "chain-agnostic" rule; dead BE config invited drift. Mainnet is the live target.
+**New conventions:** add new chains by extending `utils/chainConfig.ts` (FE) and `helpers/chainConfig.ts` (BE) — never inline. Seed scripts read `CHAIN_ID` env, default `43114`.
+
+### Pimlico bundler/paymaster migration (2026-04-27)
+**What:** Replaced ZeroDev infra (bundler + paymaster) with Pimlico in `crypto.ts`. All `@zerodev/*` SDK packages are **kept** (they provide Kernel v3.1 contract bindings — removing them would break all existing smart accounts). Chain is now driven by `VITE_CHAIN_ID` (defaulting to Avalanche mainnet 43114) via a `getChain()` helper — no more hardcoded `avalancheFuji`.
+
+**Why:** ZeroDev Pro plan ($69/mo) required for mainnet RPC traffic; Pimlico is PAYG with a free tier. Chain ID was hardcoded to Fuji (43113) but the live app runs on mainnet (43114).
+
+**New conventions:**
+- Env vars are `VITE_PIMLICO_BUNDLER_URL` / `VITE_PIMLICO_PAYMASTER_URL` (old `VITE_ZERODEV_RPC` / `VITE_PAYMASTER_URL` are gone).
+- `VITE_CHAIN_ID` controls which viem chain is used in `crypto.ts`; resolves via `getChain()` — add new chain IDs there.
+- The term "ZeroDev" remains only as the wire-format label `ZerodevMessage` on the FE↔BE delegation protocol — do not rename in unrelated PRs.
+- `createSessionKeyClient` now uses `createPimlicoClient` (from `permissionless/clients/pimlico`) with EntryPoint 0.7 pinned, and includes `estimateFeesPerGas` via `getUserOperationGasPrice().fast` (recommended on Avalanche to avoid stale gas estimates).
+
+**Rollback:** revert `crypto.ts` + 3 mechanical renames + restore old env vars — no on-chain state changes.
 
 ### Endpoint auth hardening — `useRequest` (2026-04-25)
 `GET /request/:requestId` now requires `Authorization: Bearer <privyToken>` for `sign`/`approve` requests. `useRequest` pulls the token via `usePrivyToken()` and attaches it when non-null. The token is omitted on the first hit for `auth` requests (user has no token yet — BE keeps this endpoint unauthenticated for `auth`). 401/403 responses surface via `log.warn` (→ sonner toast). Token is never logged.
@@ -267,11 +289,11 @@ Manual sign uses the same SCA + chain + paymaster — if session-key UserOp fail
 
 ### Rule 2: `SigningRequestModal` is only for `autoSign: false`
 Modal uses `useSmartWallets().client.sendTransaction` (Privy EOA, no ZeroDev paymaster). Never a fallback for an auto-sign path expecting sponsorship. New handler split:
-- `autoSign: true` → `createSessionKeyClient(blob, ZERODEV_RPC, PAYMASTER_URL)`.
+- `autoSign: true` → `createSessionKeyClient(blob, BUNDLER_URL, PAYMASTER_URL)`.
 - `autoSign: false` → `useSmartWallets()`.
 
-### Rule 3: ZeroDev v3 — bundler URL == paymaster URL
-Both `VITE_ZERODEV_RPC` and `VITE_PAYMASTER_URL` must be `https://rpc.zerodev.app/api/v3/<PROJECT_ID>/chain/<CHAIN_ID>`. Method name (`eth_sendUserOperation` vs `pm_getPaymasterStubData`) routes bundler vs paymaster on ZeroDev's side. **Do not invent a `/paymaster/` path segment** (404s with `Cannot POST /api/v3/paymaster/.../chain/...`). v2 used a different shape — we're on v3.
+### Rule 3: Pimlico — one URL for bundler and paymaster
+Both `VITE_PIMLICO_BUNDLER_URL` and `VITE_PIMLICO_PAYMASTER_URL` can point at the same Pimlico per-chain endpoint (`https://api.pimlico.io/v2/<chainId>/rpc?apikey=…`). Pimlico routes `eth_sendUserOperation` vs `pm_getPaymasterStubData` internally. Keep them as two separate env vars for independent override capability.
 
 ### Rule 4: `autoSignError` must stay surfaced
 Never `setAutoSignError(null)` without also clearing `autoSignAttemptedRef.current`. Never render only as a toast/banner — must be in a copyable view (Telegram clips overlays). Log every failure with `[AEGIS:SignHandler]` prefix.
@@ -290,12 +312,12 @@ Any new auto-sign handler **must** take `keyStatus` as a prop from `App.tsx`.
 - [ ] `autoSign:false` path uses `SigningRequestModal`.
 - [ ] Consumes `keyStatus` and waits on `processing`.
 - [ ] Logs `[AEGIS:<HandlerName>]` prefix.
-- [ ] No hardcoded chain object/RPC — pull from `crypto.ts`/env (and lift to a FE `chainConfig` when multi-chain ships, per root CLAUDE.md).
+- [ ] No hardcoded chain object/RPC — pull from `utils/chainConfig.ts`/env.
 
 ---
 
 ## Known Invariants / Gotchas
-- Chain hard-coded to **Avalanche Fuji** in `crypto.ts`. Multi-chain support requires threading `chain` through `installSessionKey`, `createSessionKeyClient`, wallet/public clients.
+- Chain is driven by `VITE_CHAIN_ID` (defaults `43114` — Avalanche mainnet). `getChain()` in `utils/chainConfig.ts` resolves it to a viem chain object; **add new chains to that registry, not inline**. Multi-chain support already threads `chain` through all clients in `installSessionKey` / `createSessionKeyClient`.
 - Privy token refresh is the caller's responsibility — `usePrivyToken` fetches once on `authenticated` flip; long sessions may see stale tokens. Re-mount or call `getAccessToken()` if 401 bounces.
 - `useRequest` reads `requestId` once at mount. For chained swap steps, `SignHandler` uses `fetchNextRequest` directly — URL stays fixed.
 - `SmartWalletsProvider` must wrap `App`; `useSmartWallets()` throws otherwise.

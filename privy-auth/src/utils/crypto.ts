@@ -1,15 +1,20 @@
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createWalletClient, createPublicClient, custom, http } from 'viem';
-import { avalancheFuji } from 'viem/chains';
 import { toOwner } from 'permissionless/utils';
+import { createPimlicoClient } from 'permissionless/clients/pimlico';
+import { entryPoint07Address } from 'viem/account-abstraction';
 import { signerToEcdsaValidator } from '@zerodev/ecdsa-validator';
-import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount, createZeroDevPaymasterClient } from '@zerodev/sdk';
+import { createKernelAccount, createKernelAccountClient, addressToEmptyAccount } from '@zerodev/sdk';
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
 import { toECDSASigner } from '@zerodev/permissions/signers';
 import { toPermissionValidator, serializePermissionAccount, deserializePermissionAccount } from '@zerodev/permissions';
 import { toSudoPolicy } from '@zerodev/permissions/policies';
 import type { EIP1193Provider } from 'viem';
 import type { KernelAccountClient } from '@zerodev/sdk';
+import { createLogger } from './logger';
+import { getChain, getRpcUrl } from './chainConfig';
+
+const log = createLogger('crypto');
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,22 +111,27 @@ export async function installSessionKey(
   signerAddress: `0x${string}`,
   sessionPrivateKey: `0x${string}`,
   sessionKeyAddress: `0x${string}`,
-  zerodevRpc: string,
+  bundlerRpc: string,
 ): Promise<string> {
+  const chain = getChain();
+
   // 1. Build a viem WalletClient backed by the Privy embedded wallet provider
   const walletClient = createWalletClient({
     account: signerAddress,
-    chain: avalancheFuji,
+    chain,
     transport: custom(provider as Parameters<typeof custom>[0]),
   });
 
   // 2. Convert to a ZeroDev-compatible SmartAccountSigner
   const privySigner = await toOwner({ owner: walletClient });
 
-  // 3. Public client pointing at the ZeroDev bundler RPC
+  // 3. Public client pointing at the chain JSON-RPC (NOT the bundler RPC).
+  //    ZeroDev uses this for eth_call / eth_getCode against the kernel factory and
+  //    validator contracts; bundler-only endpoints return non-standard revert
+  //    envelopes that crash viem's error decoder ("revertError.cause.data.match").
   const publicClient = createPublicClient({
-    transport: http(zerodevRpc),
-    chain: avalancheFuji,
+    transport: http(getRpcUrl()),
+    chain,
   });
 
   const entryPoint = getEntryPoint('0.7');
@@ -169,37 +179,62 @@ export async function installSessionKey(
 
 export async function createSessionKeyClient(
   serializedBlob: string,
-  zerodevRpc: string,
+  bundlerRpc: string,
   paymasterUrl?: string,
+  sponsorshipPolicyId?: string,
 ): Promise<KernelAccountClient> {
-  const publicClient = createPublicClient({
-    transport: http(zerodevRpc),
-    chain: avalancheFuji,
+  log.debug('createSessionKeyClient', {
+    hasPaymaster: !!paymasterUrl,
+    hasPolicy: !!sponsorshipPolicyId,
   });
-  const entryPoint = getEntryPoint('0.7');
+  try {
+    const chain = getChain();
+    const publicClient = createPublicClient({
+      transport: http(getRpcUrl()),
+      chain,
+    });
+    const entryPoint = getEntryPoint('0.7');
 
-  // Reconstructs the full KernelSmartAccount from the serialized blob.
-  // The blob contains the session private key and all on-chain permission proof data.
-  const account = await deserializePermissionAccount(
-    publicClient,
-    entryPoint,
-    KERNEL_V3_1,
-    serializedBlob,
-  );
+    // Reconstructs the full KernelSmartAccount from the serialized blob.
+    // The blob contains the session private key and all on-chain permission proof data.
+    const account = await deserializePermissionAccount(
+      publicClient,
+      entryPoint,
+      KERNEL_V3_1,
+      serializedBlob,
+    );
 
-  const paymasterClient = paymasterUrl
-    ? createZeroDevPaymasterClient({ chain: avalancheFuji, transport: http(paymasterUrl) })
-    : null;
+    const pimlicoClient = paymasterUrl
+      ? createPimlicoClient({
+          transport: http(paymasterUrl),
+          entryPoint: { address: entryPoint07Address, version: '0.7' },
+        })
+      : null;
 
-  return createKernelAccountClient({
-    account,
-    chain: avalancheFuji,
-    bundlerTransport: http(zerodevRpc),
-    ...(paymasterClient && {
-      paymaster: {
-        getPaymasterData: paymasterClient.getPaymasterData,
-        getPaymasterStubData: paymasterClient.getPaymasterStubData,
-      },
-    }),
-  });
+    // Pimlico applies the sponsorship policy only when sponsorshipPolicyId is
+    // attached to the paymaster RPC params. Without it the paymaster falls back
+    // to its account-default policy (which may reject everything).
+    const policyExt = sponsorshipPolicyId ? { sponsorshipPolicyId } : {};
+
+    return createKernelAccountClient({
+      account,
+      chain,
+      bundlerTransport: http(bundlerRpc),
+      ...(pimlicoClient && {
+        paymaster: {
+          getPaymasterData: (userOp) =>
+            pimlicoClient.getPaymasterData({ ...userOp, ...policyExt }),
+          getPaymasterStubData: (userOp) =>
+            pimlicoClient.getPaymasterStubData({ ...userOp, ...policyExt }),
+        },
+        userOperation: {
+          estimateFeesPerGas: async () => (await pimlicoClient.getUserOperationGasPrice()).fast,
+        },
+      }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    log.error('createSessionKeyClient failed', { err: msg });
+    throw err;
+  }
 }

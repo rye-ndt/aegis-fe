@@ -122,8 +122,8 @@ export function useDelegatedKey(options: {
     if (!signerWallet) throw new Error('Privy embedded wallet not found');
     const rawProvider = await signerWallet.getEthereumProvider();
 
-    const zerodevRpc = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
-    if (!zerodevRpc) throw new Error('VITE_ZERODEV_RPC is not set');
+    const bundlerRpc = (import.meta.env.VITE_PIMLICO_BUNDLER_URL as string) ?? '';
+    if (!bundlerRpc) throw new Error('VITE_PIMLICO_BUNDLER_URL is not set');
 
     dispatch({ type: 'PROCESSING', step: 'Installing session key on-chain…' });
     let blob: string;
@@ -133,7 +133,7 @@ export function useDelegatedKey(options: {
         signerAddress as `0x${string}`,
         keypair.privateKey,
         keypair.address,
-        zerodevRpc,
+        bundlerRpc,
       );
     } catch (err) {
       log.error('session-key-install-failed', { address: keypair.address, err: toErrorMessage(err) });

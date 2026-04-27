@@ -13,8 +13,9 @@ import { createLogger } from '../../utils/logger';
 
 const log = createLogger('SignHandler');
 
-const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
-const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
+const BUNDLER_URL    = (import.meta.env.VITE_PIMLICO_BUNDLER_URL              as string) ?? '';
+const PAYMASTER_URL  = (import.meta.env.VITE_PIMLICO_PAYMASTER_URL            as string) ?? '';
+const SPONSORSHIP_ID = (import.meta.env.VITE_PIMLICO_SPONSORSHIP_POLICY_ID    as string) ?? '';
 // Fallback timeout only starts once the delegated key is no longer being restored.
 // While unlock() is in-flight we wait indefinitely — the timer is for the case
 // where the blob is genuinely unavailable (no stored key, decrypt failed, etc.).
@@ -100,7 +101,7 @@ export function SignHandler({
     log.debug('autoSign start', {
       requestId: currentRequest.requestId,
       blobLen: serializedBlob.length,
-      hasRpc: !!ZERODEV_RPC,
+      hasRpc: !!BUNDLER_URL,
       hasPaymaster: !!PAYMASTER_URL,
       to: currentRequest.to,
       value: currentRequest.value,
@@ -113,8 +114,9 @@ export function SignHandler({
         try {
           sessionClient = await createSessionKeyClient(
             serializedBlob,
-            ZERODEV_RPC,
+            BUNDLER_URL,
             PAYMASTER_URL || undefined,
+            SPONSORSHIP_ID || undefined,
           );
           sessionClientRef.current = sessionClient;
           log.debug('session client built', { account: sessionClient.account?.address });
@@ -202,7 +204,7 @@ export function SignHandler({
             </p>
           </div>
           <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-left text-xs text-white/60 space-y-1">
-            <div>bundler: {ZERODEV_RPC ? 'set' : 'MISSING'}</div>
+            <div>bundler: {BUNDLER_URL ? 'set' : 'MISSING'}</div>
             <div>paymaster: {PAYMASTER_URL ? 'set' : 'MISSING'}</div>
             <div>to: <span className="break-all">{currentRequest.to}</span></div>
             <div>value: {currentRequest.value}</div>

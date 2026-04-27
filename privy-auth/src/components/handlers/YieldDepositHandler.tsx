@@ -12,8 +12,9 @@ import { createLogger } from '../../utils/logger';
 
 const log = createLogger('YieldDepositHandler');
 
-const ZERODEV_RPC = (import.meta.env.VITE_ZERODEV_RPC as string) ?? '';
-const PAYMASTER_URL = (import.meta.env.VITE_PAYMASTER_URL as string) ?? '';
+const BUNDLER_URL    = (import.meta.env.VITE_PIMLICO_BUNDLER_URL              as string) ?? '';
+const PAYMASTER_URL  = (import.meta.env.VITE_PIMLICO_PAYMASTER_URL            as string) ?? '';
+const SPONSORSHIP_ID = (import.meta.env.VITE_PIMLICO_SPONSORSHIP_POLICY_ID    as string) ?? '';
 const CLOSE_DELAY_MS = 1500;
 
 type SessionClient = Awaited<ReturnType<typeof createSessionKeyClient>>;
@@ -101,7 +102,12 @@ export function YieldDepositHandler({
       try {
         let sc = sessionClientRef.current;
         if (!sc) {
-          sc = await createSessionKeyClient(serializedBlob, ZERODEV_RPC, PAYMASTER_URL || undefined);
+          sc = await createSessionKeyClient(
+            serializedBlob,
+            BUNDLER_URL,
+            PAYMASTER_URL || undefined,
+            SPONSORSHIP_ID || undefined,
+          );
           sessionClientRef.current = sc;
         }
         await executeSign(sc);
