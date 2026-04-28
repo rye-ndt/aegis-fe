@@ -20,15 +20,4 @@ export default defineConfig({
     tailwindcss(),
     react(),
   ],
-  // Privy has optional Solana peer deps that aren't installed — treat them as external
-  // Note: permissionless must be bundled (not external) for browser ERC-4337 smart wallet support
-  build: {
-    rollupOptions: {
-      external: [
-        '@solana/kit',
-        '@solana-program/system',
-        '@solana-program/token',
-      ],
-    },
-  },
 })
