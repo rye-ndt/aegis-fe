@@ -3,6 +3,7 @@ import { useFundWallet, usePrivy } from '@privy-io/react-auth';
 import type { OnrampRequest } from '../../types/miniAppRequest.types';
 import { FullScreen } from '../atomics/FullScreen';
 import { Spinner } from '../atomics/spinner';
+import { ShieldIcon } from '../atomics/icons';
 import { createLogger } from '../../utils/logger';
 import { toErrorMessage } from '../../utils/toErrorMessage';
 
@@ -61,7 +62,7 @@ export function OnrampHandler({ request }: { request: OnrampRequest }) {
     return (
       <FullScreen>
         <div className="flex flex-col items-center gap-4 text-center">
-          <div className="text-5xl">✅</div>
+          <ShieldIcon size={48} variant="success" />
           <p className="text-white font-semibold">Payment submitted</p>
           <p className="text-white/70 text-sm max-w-xs">
             Funds typically arrive within a few minutes. You can close this window and return to Telegram.

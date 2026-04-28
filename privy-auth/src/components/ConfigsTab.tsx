@@ -243,7 +243,7 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
               {(grant.tokenSymbol ?? "?").slice(0, 3).toUpperCase()}
             </span>
           </div>
-          <p className="text-xs font-semibold text-white/85">{label}</p>
+          <p className="text-xs font-bold text-white/90">{label}</p>
         </div>
         {isExpired && (
           <span className="text-[9px] text-red-400/70 font-semibold uppercase tracking-wide">
@@ -255,8 +255,7 @@ function GrantRow({ grant }: { grant: GrantPermission }) {
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-white/35">Spending limit</span>
         <span className="text-white/65 font-mono">
-          {formatAmount(max)}
-          {grant.tokenSymbol ? ` ${grant.tokenSymbol}` : ""}
+          {formatAmount(max)}{grant.tokenSymbol ? <> <span className="font-bold text-white/80">{grant.tokenSymbol}</span></> : ""}
         </span>
       </div>
 

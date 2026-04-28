@@ -11,12 +11,20 @@ export function useFetch<T>(
     transform?: (body: unknown) => T;
     errorMessage?: string;
     enabled?: boolean;
+    refetchOnVisible?: boolean;
   } = {},
 ): { data: T | null; loading: boolean; error: string | null } {
-  const { headers, transform, errorMessage = 'Request failed', enabled = true } = options;
+  const {
+    headers,
+    transform,
+    errorMessage = 'Request failed',
+    enabled = true,
+    refetchOnVisible = false,
+  } = options;
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(!!url && enabled);
   const [error, setError] = React.useState<string | null>(null);
+  const [tick, setTick] = React.useState(0);
 
   React.useEffect(() => {
     if (!enabled || !url) return;
@@ -46,7 +54,16 @@ export function useFetch<T>(
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, enabled]);
+  }, [url, enabled, tick]);
+
+  React.useEffect(() => {
+    if (!refetchOnVisible || !enabled || !url) return;
+    const handler = () => {
+      if (document.visibilityState === 'visible') setTick((n) => n + 1);
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, [refetchOnVisible, enabled, url]);
 
   return { data, loading, error };
 }

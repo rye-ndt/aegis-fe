@@ -51,10 +51,15 @@ function YieldEmpty({ label }: { label: string }) {
   );
 }
 
+function withSign(value: string, positive: boolean): string {
+  if (value.startsWith('+') || value.startsWith('-')) return value;
+  return positive ? `+${value}` : value;
+}
+
 function PositionRow({ position: p }: { position: YieldPosition }) {
-  const pnlPositive = p.pnlHuman.startsWith('+') || parseFloat(p.pnlHuman) >= 0;
   const pnl24hPositive = p.pnl24hHuman.startsWith('+') || parseFloat(p.pnl24hHuman) >= 0;
   const initials = p.tokenSymbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase();
+  const pnl24hLabel = withSign(p.pnl24hHuman, pnl24hPositive);
 
   return (
     <div className="flex items-center gap-3 bg-white/[0.04] border border-white/[0.07] rounded-xl px-4 py-3">
@@ -65,19 +70,16 @@ function PositionRow({ position: p }: { position: YieldPosition }) {
         <div className="flex items-center gap-1.5">
           <p className="text-xs font-semibold text-white/90">{p.protocolName}</p>
           <span className="text-[9px] text-white/30">·</span>
-          <p className="text-[10px] text-white/50">{p.tokenSymbol}</p>
+          <p className="text-[10px] font-semibold text-white/60">{p.tokenSymbol}</p>
         </div>
         <p className="text-[10px] text-emerald-400/70 mt-0.5">
           {(p.apy * 100).toFixed(2)}% APY
         </p>
       </div>
-      <div className="text-right flex-shrink-0 flex flex-col gap-0.5">
+      <div className="text-right flex-shrink-0 flex flex-col gap-1">
         <p className="text-xs text-white/70 font-mono">${p.currentValueHuman}</p>
-        <p className={`text-[10px] font-mono ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
-          {p.pnlHuman}
-        </p>
-        <p className={`text-[9px] font-mono ${pnl24hPositive ? 'text-emerald-400/60' : 'text-red-400/60'}`}>
-          24h {p.pnl24hHuman}
+        <p className={`text-[10px] ${pnl24hPositive ? 'text-emerald-400/80' : 'text-red-400/80'}`}>
+          {pnl24hLabel} today
         </p>
       </div>
     </div>

@@ -252,7 +252,7 @@ function NotificationRow({ item }: { item: NotificationItem }) {
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-xs font-semibold text-white/90 truncate">
-          {sender} → {item.amountFormatted} {item.tokenSymbol}
+          {sender} → {item.amountFormatted} <span className="font-bold text-white">{item.tokenSymbol}</span>
         </p>
         <p className="text-[10px] text-white/30 mt-0.5">{chainName(item.chainId)}</p>
       </div>

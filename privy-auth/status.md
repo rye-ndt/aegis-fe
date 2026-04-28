@@ -1,5 +1,17 @@
 # Privy Auth Mini-App — Status Log
 
+## useFetch refetchOnVisible + delegations refresh — 2026-04-28
+
+**What was done:**
+- `useFetch.ts`: added optional `refetchOnVisible` flag. When true, registers a `visibilitychange` listener that bumps an internal `tick` (added to the effect deps) so the resource re-pulls whenever the document becomes visible.
+- `useAppData.tsx`: enabled `refetchOnVisible: true` on the `delegations` resource (and only that one).
+
+**Why:**
+- `ConfigsTab.PermissionsSection` reads `spent_raw`/`limit_raw` via `useDelegations()`. With the BE fix landing in the same change (`addSpent` now wired into `signingRequest.resolveRequest`), the bar will actually move — but `useFetch` was a one-shot effect with no refetch path. The user would run a swap in the chat surface, return to the Configs tab, and still see the stale cached value until full remount. `refetchOnVisible` covers the "user closes the sign mini-app and reopens Configs" path without needing to thread an explicit `refresh()` callback through every handler.
+- Limited to `delegations` (not portfolio/yield/profile) to avoid extra load — those have their own freshness expectations.
+
+**Convention:** if a future resource's value changes as a side-effect of an autosigned tx, opt into `refetchOnVisible: true` on its `useFetch` call.
+
 ## interpretSignError — Relay solver revert classification — 2026-04-27
 
 **What was done:**

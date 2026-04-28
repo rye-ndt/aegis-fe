@@ -182,7 +182,7 @@ export function ApprovalOnboarding({
 
       {success && (
         <div className="flex flex-col items-center gap-4 text-center">
-          <div className="text-5xl">✅</div>
+          <ShieldIcon size={48} variant="success" />
           <p className="text-white font-semibold">All set!</p>
           <p className="text-sm text-white/40 max-w-xs leading-relaxed">
             The bot is ready to trade on your behalf. Return to Telegram to get started.
@@ -238,10 +238,10 @@ function TokenLimitRow({ param }: { param: ApprovalParam }) {
             {param.tokenSymbol.slice(0, 2)}
           </span>
         </div>
-        <span className="text-sm font-medium text-white">{param.tokenSymbol}</span>
+        <span className="text-sm font-bold text-white">{param.tokenSymbol}</span>
       </div>
       <span className="text-sm text-violet-300 font-semibold">
-        {toHumanAmount(param.suggestedLimitRaw, param.tokenDecimals)} {param.tokenSymbol}
+        {toHumanAmount(param.suggestedLimitRaw, param.tokenDecimals)} <span className="font-bold">{param.tokenSymbol}</span>
       </span>
     </div>
   );

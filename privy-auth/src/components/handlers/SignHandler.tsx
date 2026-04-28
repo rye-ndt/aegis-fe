@@ -255,7 +255,7 @@ export function SignHandler({
     return (
       <FullScreen>
         <div className="flex flex-col items-center gap-4">
-          <div className="text-5xl">✅</div>
+          <ShieldIcon size={48} variant="success" />
           <p className="text-white font-semibold">Transaction sent</p>
         </div>
       </FullScreen>

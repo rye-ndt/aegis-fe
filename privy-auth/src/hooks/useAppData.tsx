@@ -121,6 +121,10 @@ export function AppDataProvider({
       headers: authHeaders,
       transform: parseGrants,
       errorMessage: 'Could not load permissions',
+      // Bar reflects spent_raw which only changes after autosigned txs resolve
+      // server-side. Re-pull whenever the mini app regains focus so the user
+      // sees fresh values without a full remount.
+      refetchOnVisible: true,
     },
   );
 
