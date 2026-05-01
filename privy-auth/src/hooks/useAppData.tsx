@@ -138,7 +138,7 @@ export function AppDataProvider({
   );
 
   const userProfile = useFetch<UserProfile>(
-    privyToken && backendUrl ? `${backendUrl}/me` : null,
+    privyToken && backendUrl ? `${backendUrl}/user/profile` : null,
     {
       headers: authHeaders,
       transform: parseUserProfile,
