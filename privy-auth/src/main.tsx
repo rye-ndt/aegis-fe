@@ -1,7 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { PrivyProvider } from '@privy-io/react-auth'
-import { SmartWalletsProvider } from '@privy-io/react-auth/smart-wallets'
 import './index.css'
 import App from './App.tsx'
 import { TelegramAutoLogin } from './components/TelegramAutoLogin.tsx'
@@ -32,10 +31,8 @@ createRoot(document.getElementById('root')!).render(
         },
       }}
     >
-      <SmartWalletsProvider>
-        <TelegramAutoLogin />
-        <App />
-      </SmartWalletsProvider>
+      <TelegramAutoLogin />
+      <App />
     </PrivyProvider>
   </StrictMode>,
 )

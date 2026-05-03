@@ -1,8 +1,9 @@
 import React from 'react';
 import { Toaster } from 'sonner';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { useSmartWallets } from '@privy-io/react-auth/smart-wallets';
 import { useDelegatedKey } from './hooks/useDelegatedKey';
+import { deriveScaAddress } from './utils/deriveScaAddress';
+import { toErrorMessage } from './utils/toErrorMessage';
 import { useRequest } from './hooks/useRequest';
 import { AuthHandler } from './components/handlers/AuthHandler';
 import { SignHandler } from './components/handlers/SignHandler';
@@ -26,7 +27,6 @@ function isInsideTelegram() {
 export default function App() {
   const { ready, authenticated, user } = usePrivy();
   const { wallets } = useWallets();
-  const { client } = useSmartWallets();
   const privyToken = usePrivyToken();
   const backendUrl = (import.meta.env.VITE_BACKEND_URL as string) ?? '';
   const [tmaLoginTimedOut, setTmaLoginTimedOut] = React.useState(false);
@@ -46,7 +46,16 @@ export default function App() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
   const eoaAddress = (embeddedWallet ?? wallets[0])?.address ?? '';
-  const smartAddress = client?.account?.address ?? '';
+
+  const [smartAddress, setSmartAddress] = React.useState('');
+  React.useEffect(() => {
+    if (!eoaAddress) { setSmartAddress(''); return; }
+    let cancelled = false;
+    deriveScaAddress(eoaAddress as `0x${string}`)
+      .then((sca) => { if (!cancelled) setSmartAddress(sca); })
+      .catch((err) => log.error('derive-sca-failed', { err: toErrorMessage(err) }));
+    return () => { cancelled = true; };
+  }, [eoaAddress]);
 
   const delegatedKey = useDelegatedKey({
     smartAccountAddress: smartAddress,

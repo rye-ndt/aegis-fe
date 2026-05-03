@@ -1,5 +1,23 @@
 # Privy Auth Mini-App — Status Log
 
+## Self-derived smart-account address — 2026-05-03
+
+**What was done:**
+- New `utils/aaConfig.ts` and `utils/deriveScaAddress.ts`: pinned AA stack constants (entry point 0.7, Kernel V3.1, `index = 0n`) and a counterfactual SCA derivation helper. MUST stay in sync with `be/src/helpers/aaConfig.ts`.
+- New `utils/createSudoClient.ts`: builds a `KernelAccountClient` with the Privy embedded EOA as the sudo signer, wired to the same Pimlico bundler/paymaster as `createSessionKeyClient`. Replaces what `useSmartWallets().client` provided for manual-sign UserOps.
+- `App.tsx`: dropped `useSmartWallets()`. `smartAddress` is now a `useState`/`useEffect` driven by `deriveScaAddress(eoaAddress)`. Downstream readers already accept `''` as "not ready yet" so no signature changes propagate.
+- `SignHandler.tsx` + `YieldDepositHandler.tsx`: dropped `useSmartWallets()`. Manual-sign path now lazily builds a `sudoClient` via `createSudoClient(provider, eoa, ...)` using `embedded.getEthereumProvider()`. The Privy popup behavior is unchanged because the underlying signer is the same EOA via the same EIP-1193 provider.
+- `main.tsx`: dropped `SmartWalletsProvider` wrapping. `@privy-io/react-auth/smart-wallets` no longer imported anywhere in the app.
+
+**Why:**
+- Privy's hosted smart-wallets product owned both the Kernel constants and address derivation. Dashboard / SDK changes could silently change a user's SCA out from under us. By pinning the AA stack in `aaConfig.ts` and deriving the address ourselves, the FE cannot drift from the BE — the two `aaConfig` files agree by construction.
+- This unblocks the BE recipient-resolution fix: when a recipient onboards with a fresh Privy EOA, the SCA they end up owning matches the one the BE derived for them at handle resolution time. Behavioral promise: byte-identical `smartAddress` for every already-onboarded user (proven by the BE `verify-sca-derivation.ts` gate before the BE switches to derivation).
+
+**New conventions:**
+- AA stack constants live exclusively in `utils/aaConfig.ts`. Never inline `entryPoint`, `kernelVersion`, or `index` elsewhere. The two `aaConfig.ts` files (FE + BE) MUST stay in lockstep.
+- Manual-sign userOps go through `createSudoClient`, never through `useSmartWallets`. Do not reintroduce `@privy-io/react-auth/smart-wallets` — `useFundWallet`, `usePrivy`, `useWallets`, `loginWithTelegram` all come from the base `@privy-io/react-auth` and are unaffected.
+- The `sudoClient` is built lazily and cached in a ref; it is not built during render. Don't move the construction up into a `useEffect` on mount — the EIP-1193 provider isn't always ready before first user interaction.
+
 ## useFetch refetchOnVisible + delegations refresh — 2026-04-28
 
 **What was done:**

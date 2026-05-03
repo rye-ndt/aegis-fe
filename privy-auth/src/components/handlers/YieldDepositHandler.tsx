@@ -1,8 +1,10 @@
 import React from 'react';
-import { useSmartWallets } from '@privy-io/react-auth/smart-wallets';
+import { useWallets } from '@privy-io/react-auth';
+import type { KernelAccountClient } from '@zerodev/sdk';
 import type { SignRequest } from '../../types/miniAppRequest.types';
 import { postResponse } from '../../utils/postResponse';
 import { createSessionKeyClient } from '../../utils/crypto';
+import { createSudoClient } from '../../utils/createSudoClient';
 import { fetchNextRequest } from '../../utils/fetchNextRequest';
 import { toErrorMessage } from '../../utils/toErrorMessage';
 import { FullScreen } from '../atomics/FullScreen';
@@ -33,7 +35,25 @@ export function YieldDepositHandler({
   serializedBlob: string | null;
   mode: 'deposit' | 'withdraw';
 }) {
-  const { client } = useSmartWallets();
+  const { wallets } = useWallets();
+  const embedded = wallets.find((w) => w.walletClientType === 'privy');
+  const sudoClientRef = React.useRef<KernelAccountClient | null>(null);
+
+  const getSudoClient = React.useCallback(async (): Promise<KernelAccountClient> => {
+    if (sudoClientRef.current) return sudoClientRef.current;
+    if (!embedded) throw new Error('Embedded wallet not available');
+    const provider = await embedded.getEthereumProvider();
+    const c = await createSudoClient(
+      provider,
+      embedded.address as `0x${string}`,
+      BUNDLER_URL,
+      PAYMASTER_URL || undefined,
+      SPONSORSHIP_ID || undefined,
+    );
+    sudoClientRef.current = c;
+    return c;
+  }, [embedded]);
+
   const [phase, setPhase] = React.useState<Phase>(request.autoSign ? 'signing' : 'presign');
   const [error, setError] = React.useState<string | null>(null);
   const autoSignAttemptedRef = React.useRef(false);
@@ -122,16 +142,17 @@ export function YieldDepositHandler({
   }, [request.autoSign, request.requestId, serializedBlob, mode, executeSign]);
 
   const handleManualSign = React.useCallback(async () => {
-    if (!client) return;
+    if (!embedded) return;
     setPhase('signing');
     setError(null);
     log.info('step', { step: 'started', requestId: request.requestId, mode, path: 'manual' });
     try {
-      const hash = await client.sendTransaction({
+      const sudoClient = await getSudoClient();
+      const hash = await sudoClient.sendTransaction({
         to: request.to as `0x${string}`,
         value: BigInt(request.value),
         data: request.data as `0x${string}`,
-        account: client.account!,
+        account: sudoClient.account!,
         chain: null,
       });
       log.info('step', { step: 'succeeded', requestId: request.requestId, mode, hash, path: 'manual' });
@@ -144,7 +165,7 @@ export function YieldDepositHandler({
       setError(msg);
       setPhase('presign');
     }
-  }, [client, request, reportTxHash, mode]);
+  }, [embedded, getSudoClient, request, reportTxHash, mode]);
 
   if (phase === 'done') {
     return (
@@ -232,7 +253,7 @@ export function YieldDepositHandler({
         <div className="flex flex-col gap-3 w-full">
           <button
             onClick={handleManualSign}
-            disabled={!client}
+            disabled={!embedded}
             className="w-full py-3.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-semibold text-sm disabled:opacity-50"
           >
             {isDeposit ? 'Deposit' : 'Withdraw'}

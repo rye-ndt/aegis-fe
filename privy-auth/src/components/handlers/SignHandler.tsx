@@ -1,8 +1,10 @@
 import React from 'react';
-import { useSmartWallets } from '@privy-io/react-auth/smart-wallets';
+import { useWallets } from '@privy-io/react-auth';
+import type { KernelAccountClient } from '@zerodev/sdk';
 import type { SignRequest } from '../../types/miniAppRequest.types';
 import { postResponse } from '../../utils/postResponse';
 import { createSessionKeyClient } from '../../utils/crypto';
+import { createSudoClient } from '../../utils/createSudoClient';
 import { fetchNextRequest } from '../../utils/fetchNextRequest';
 import { SigningRequestModal } from '../SigningRequestModal';
 import { FullScreen } from '../atomics/FullScreen';
@@ -39,7 +41,25 @@ export function SignHandler({
   serializedBlob: string | null;
   keyStatus: DelegationState['status'];
 }) {
-  const { client } = useSmartWallets();
+  const { wallets } = useWallets();
+  const embedded = wallets.find((w) => w.walletClientType === 'privy');
+  const sudoClientRef = React.useRef<KernelAccountClient | null>(null);
+
+  const getSudoClient = React.useCallback(async (): Promise<KernelAccountClient> => {
+    if (sudoClientRef.current) return sudoClientRef.current;
+    if (!embedded) throw new Error('Embedded wallet not available');
+    const provider = await embedded.getEthereumProvider();
+    const c = await createSudoClient(
+      provider,
+      embedded.address as `0x${string}`,
+      BUNDLER_URL,
+      PAYMASTER_URL || undefined,
+      SPONSORSHIP_ID || undefined,
+    );
+    sudoClientRef.current = c;
+    return c;
+  }, [embedded]);
+
   const [currentRequest, setCurrentRequest] = React.useState<SignRequest>(initialRequest);
   const [showManual, setShowManual] = React.useState(!initialRequest.autoSign);
   const [done, setDone] = React.useState(false);
@@ -367,13 +387,14 @@ export function SignHandler({
         autoSign: currentRequest.autoSign,
       }}
       approve={async () => {
-        if (!client) throw new Error('Smart wallet not ready');
+        if (!embedded) throw new Error('Smart wallet not ready');
         log.info('step', { step: 'started', requestId: currentRequest.requestId, path: 'manual' });
-        const hash = await client.sendTransaction({
+        const sudoClient = await getSudoClient();
+        const hash = await sudoClient.sendTransaction({
           to: currentRequest.to as `0x${string}`,
           value: BigInt(currentRequest.value),
           data: currentRequest.data as `0x${string}`,
-          account: client.account!,
+          account: sudoClient.account!,
           chain: null,
         });
         log.info('step', { step: 'succeeded', requestId: currentRequest.requestId, hash, path: 'manual' });
