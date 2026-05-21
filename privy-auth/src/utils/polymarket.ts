@@ -1,24 +1,26 @@
-// EIP-712 shape MUST match on-chain CTFExchange Signatures.sol — verify before
-// any non-test stake.
+// FE → Polymarket CLOB integration. Order signing happens generically in
+// dispatchSign against the BE-supplied typed data; this module only carries
+// the public read/submit surface and the canonical typed-data shape
+// constants (kept here so tests and the BE enqueue helpers reference one
+// source of truth).
 
-import { privateKeyToAccount } from 'viem/accounts';
-import { keccak256, parseUnits, toHex } from 'viem';
-import type { Hex } from 'viem';
-import { getPolymarketAddresses } from './chainConfig';
+import { parseUnits, toHex } from 'viem';
 import type { PolymarketOrderArtifact } from '../types/predictionMarket.types';
+import { hmacSign } from './hmac';
 
 export const POLYMARKET_CHAIN_ID = 137;
 
-function buildDomain(verifyingContract: `0x${string}`) {
-  return {
-    name: 'Polymarket CTF Exchange',
-    version: '1',
-    chainId: POLYMARKET_CHAIN_ID,
-    verifyingContract,
-  } as const;
-}
+// FE-only — BE never holds CLOB creds (non-custodial invariant #2). Override
+// via VITE_POLYMARKET_CLOB_API for staging / proxy testing.
+export const POLYMARKET_CLOB_API_BASE: string =
+  (import.meta.env.VITE_POLYMARKET_CLOB_API as string | undefined) ??
+  'https://clob.polymarket.com';
 
-const ORDER_TYPES = {
+// Polymarket `Order` EIP-712 type, mirrored from on-chain CTFExchange
+// Signatures.sol. Kept here as a reference shape for tests + manual-confirm
+// preview rendering. The actual `req.types` carried on every queued sign
+// request is what dispatchSign feeds to viem.signTypedData.
+export const POLYMARKET_ORDER_TYPES = {
   Order: [
     { name: 'salt', type: 'uint256' },
     { name: 'maker', type: 'address' },
@@ -35,85 +37,21 @@ const ORDER_TYPES = {
   ],
 } as const;
 
+export const POLYMARKET_CLOB_AUTH_TYPES = {
+  ClobAuth: [
+    { name: 'address', type: 'address' },
+    { name: 'timestamp', type: 'string' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'message', type: 'string' },
+  ],
+} as const;
+
 export type OrderSide = 'BUY' | 'SELL';
-
-export interface BuildOrderInput {
-  maker: `0x${string}`;
-  tokenId: string;
-  priceBps: number;
-  shares: string;
-  side: OrderSide;
-  expiration?: number;
-  salt: string;
-  nonce?: string;
-  feeRateBps?: number;
-  negRisk?: boolean;
-}
-
-export function buildUnsignedOrder(input: BuildOrderInput): Omit<PolymarketOrderArtifact, 'signature'> {
-  const sideEnum: 0 | 1 = input.side === 'BUY' ? 0 : 1;
-
-  // BUY: makerAmount = USDC paid, takerAmount = shares received. SELL flips.
-  const sharesNum = parseUnits(input.shares, 6);
-  const usdcNum = (sharesNum * BigInt(input.priceBps)) / 10_000n;
-
-  const makerAmount = sideEnum === 0 ? usdcNum : sharesNum;
-  const takerAmount = sideEnum === 0 ? sharesNum : usdcNum;
-
-  return {
-    salt: input.salt,
-    maker: input.maker,
-    signer: input.maker,
-    taker: '0x0000000000000000000000000000000000000000',
-    tokenId: input.tokenId,
-    makerAmount: makerAmount.toString(),
-    takerAmount: takerAmount.toString(),
-    expiration: String(input.expiration ?? 0),
-    nonce: input.nonce ?? '0',
-    feeRateBps: String(input.feeRateBps ?? 0),
-    side: sideEnum,
-    signatureType: 0,
-  };
-}
 
 export function randomSalt(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return BigInt(toHex(bytes)).toString();
-}
-
-export function clientOrderIdFromSalt(salt: string, maker: `0x${string}`): string {
-  return keccak256(toHex(`${maker}-${salt}`));
-}
-
-export async function signOrder(
-  sessionPrivateKey: Hex,
-  unsigned: Omit<PolymarketOrderArtifact, 'signature'>,
-  opts: { negRisk?: boolean } = {},
-): Promise<PolymarketOrderArtifact> {
-  const account = privateKeyToAccount(sessionPrivateKey);
-  const addrs = getPolymarketAddresses(POLYMARKET_CHAIN_ID);
-  const verifyingContract = opts.negRisk ? addrs.negRiskExchange : addrs.ctfExchange;
-  const signature = await account.signTypedData({
-    domain: buildDomain(verifyingContract),
-    types: ORDER_TYPES,
-    primaryType: 'Order',
-    message: {
-      salt: BigInt(unsigned.salt),
-      maker: unsigned.maker,
-      signer: unsigned.signer,
-      taker: unsigned.taker,
-      tokenId: BigInt(unsigned.tokenId),
-      makerAmount: BigInt(unsigned.makerAmount),
-      takerAmount: BigInt(unsigned.takerAmount),
-      expiration: BigInt(unsigned.expiration),
-      nonce: BigInt(unsigned.nonce),
-      feeRateBps: BigInt(unsigned.feeRateBps),
-      side: unsigned.side,
-      signatureType: unsigned.signatureType,
-    },
-  });
-  return { ...unsigned, signature };
 }
 
 export function applySlippage(priceBps: number, slippageBps: number, side: OrderSide): number {
@@ -125,7 +63,6 @@ export function sharesForStake(stakeUsdc: string, priceBps: number): string {
   const stake = parseUnits(stakeUsdc, 6);
   if (priceBps <= 0) throw new Error('priceBps must be positive');
   const shares = (stake * 10_000n) / BigInt(priceBps);
-  // Format as 6-decimal string.
   const whole = shares / 1_000_000n;
   const frac = shares % 1_000_000n;
   if (frac === 0n) return whole.toString();
@@ -133,54 +70,21 @@ export function sharesForStake(stakeUsdc: string, priceBps: number): string {
   return `${whole}.${fracStr}`;
 }
 
-const CLOB_AUTH_TYPES = {
-  ClobAuth: [
-    { name: 'address', type: 'address' },
-    { name: 'timestamp', type: 'string' },
-    { name: 'nonce', type: 'uint256' },
-    { name: 'message', type: 'string' },
-  ],
-} as const;
-
-const CLOB_AUTH_DOMAIN = {
-  name: 'ClobAuthDomain',
-  version: '1',
-  chainId: POLYMARKET_CHAIN_ID,
-} as const;
-
-const CLOB_AUTH_MESSAGE = 'This message attests that I control the given wallet';
-
-export interface ClobAuthSignature {
-  signer: `0x${string}`;
-  timestamp: string;
-  nonce: string;
-  signature: `0x${string}`;
-}
-
-export async function signClobAuth(
-  sessionPrivateKey: Hex,
-  nonce = '0',
-): Promise<ClobAuthSignature> {
-  const account = privateKeyToAccount(sessionPrivateKey);
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = await account.signTypedData({
-    domain: CLOB_AUTH_DOMAIN,
-    types: CLOB_AUTH_TYPES,
-    primaryType: 'ClobAuth',
-    message: {
-      address: account.address,
-      timestamp,
-      nonce: BigInt(nonce),
-      message: CLOB_AUTH_MESSAGE,
-    },
-  });
-  return { signer: account.address, timestamp, nonce, signature };
+interface ClobCreds {
+  apiKey: string;
+  secret: string;
+  passphrase: string;
 }
 
 export async function deriveClobApiKey(
   apiBase: string,
-  auth: ClobAuthSignature,
-): Promise<{ apiKey: string; secret: string; passphrase: string }> {
+  auth: {
+    signer: `0x${string}` | string;
+    timestamp: string;
+    nonce: string;
+    signature: `0x${string}` | string;
+  },
+): Promise<ClobCreds> {
   const r = await fetch(`${apiBase}/auth/api-key`, {
     method: 'POST',
     headers: {
@@ -191,6 +95,46 @@ export async function deriveClobApiKey(
       POLY_NONCE: auth.nonce,
     },
   });
-  if (!r.ok) throw new Error(`clob /auth/api-key → ${r.status}`);
-  return r.json() as Promise<{ apiKey: string; secret: string; passphrase: string }>;
+  if (!r.ok) throw new Error(`clob /auth/api-key → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = (await r.json()) as Partial<ClobCreds> & { errorMsg?: string };
+  if (!j.apiKey || !j.secret || !j.passphrase) {
+    throw new Error(`CLOB rejected auth: ${j.errorMsg ?? 'missing apiKey/secret/passphrase'}`);
+  }
+  return { apiKey: j.apiKey, secret: j.secret, passphrase: j.passphrase };
+}
+
+/** Submit a signed Polymarket order directly to clob.polymarket.com using
+ *  FE-held HMAC creds. Never goes through BE — non-custodial invariant #2.
+ *  Throws on any non-2xx or if the CLOB rejects the order with an errorMsg. */
+export async function submitPolymarketOrder(opts: {
+  order: PolymarketOrderArtifact;
+  creds: ClobCreds;
+  apiBase: string;
+}): Promise<string /* polymarketOrderId */> {
+  const body = JSON.stringify({
+    order: opts.order,
+    owner: opts.creds.apiKey,
+    orderType: 'GTC',
+  });
+  const ts = String(Math.floor(Date.now() / 1000));
+  const sig = await hmacSign(opts.creds.secret, `${ts}POST/order${body}`);
+  const r = await fetch(`${opts.apiBase}/order`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      POLY_ADDRESS: opts.order.maker,
+      POLY_SIGNATURE: sig,
+      POLY_TIMESTAMP: ts,
+      POLY_API_KEY: opts.creds.apiKey,
+      POLY_PASSPHRASE: opts.creds.passphrase,
+    },
+    body,
+  });
+  if (!r.ok) {
+    throw new Error(`CLOB /order → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  }
+  const j = (await r.json()) as { orderID?: string; orderId?: string; errorMsg?: string };
+  const id = j.orderID ?? j.orderId;
+  if (!id) throw new Error(`CLOB rejected order: ${j.errorMsg ?? 'no orderID in response'}`);
+  return id;
 }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useWallets } from '@privy-io/react-auth';
 import type { KernelAccountClient } from '@zerodev/sdk';
-import type { SignRequest } from '../../types/miniAppRequest.types';
+import type { SignRequest, SignResponse } from '../../types/miniAppRequest.types';
 import { postResponse } from '../../utils/postResponse';
 import { createSessionKeyClient } from '../../utils/crypto';
 import { createSudoClient } from '../../utils/createSudoClient';
@@ -14,10 +14,12 @@ import type { DelegationState } from '../../hooks/useDelegatedKey';
 import { BscDelegationModal } from '../BscDelegationModal';
 import { createLogger } from '../../utils/logger';
 import { interpretSignError, type InterpretedError } from '../../utils/interpretSignError';
-import { findRecentBroadcast, trackInFlightBroadcast } from '../../utils/recentBroadcasts';
+import { findRecentBroadcast } from '../../utils/recentBroadcasts';
 import { getChainId, getPaymasterUrl, getBundlerUrl, getRpcUrlById, getSponsorshipPolicyId } from '../../utils/chainConfig';
 import { extractViemErrorContext, buildErrorRaw } from '../../utils/extractViemErrorContext';
 import { getLastRpc, summarizeLastRpc, setBundlerAuthToken } from '../../utils/rpcTrace';
+import { dispatchSign, type DispatchResult } from './dispatchSign';
+import { loadSessionEoa } from '../../utils/sessionEoa';
 
 const log = createLogger('SignHandler');
 
@@ -32,6 +34,7 @@ type SessionClient = Awaited<ReturnType<typeof createSessionKeyClient>>;
 export function SignHandler({
   request: initialRequest,
   privyToken,
+  privyDid,
   backendUrl,
   serializedBlob,
   serializedBlobs,
@@ -42,6 +45,10 @@ export function SignHandler({
 }: {
   request: SignRequest;
   privyToken: string;
+  /** Same value used to encrypt the `delegated_key` blob. Threaded into
+   *  dispatchSign for the eip712 / eoa_tx paths that need the session EOA
+   *  + per-protocol secret blobs (CLOB creds). */
+  privyDid: string;
   backendUrl: string;
   serializedBlob: string | null;
   serializedBlobs?: Record<number, string>;
@@ -133,6 +140,31 @@ export function SignHandler({
     [currentRequest, privyToken, backendUrl],
   );
 
+  const loadEoa = React.useCallback(
+    () => loadSessionEoa(privyDid),
+    [privyDid],
+  );
+
+  const buildResponseBody = React.useCallback(
+    (req: SignRequest, r: DispatchResult): SignResponse => {
+      const base = {
+        requestId: req.requestId,
+        requestType: 'sign' as const,
+        privyToken,
+      };
+      if (r.kind === 'eip712') {
+        return {
+          ...base,
+          signature: r.signature,
+          signer: r.signer,
+          polymarketOrderId: r.polymarketOrderId,
+        };
+      }
+      return { ...base, txHash: r.hash };
+    },
+    [privyToken],
+  );
+
   const reqChainIdForGate = currentRequest.chainId ?? getChainId();
   const needsCrossChainApproval =
     !!installedChainIds &&
@@ -199,136 +231,109 @@ export function SignHandler({
     });
 
     (async () => {
-      let sessionClient: SessionClient;
-      try {
-        sessionClient = await getSessionClient(reqChainId);
-        log.debug('session client built', { account: sessionClient.account?.address, chainId: reqChainId });
-      } catch (err) {
-        const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-        const interpreted = interpretSignError(err);
-        log.error('createSessionKeyClient failed', { requestId: currentRequest.requestId, chainId: reqChainId, err: msg }, { toast: false });
-        log.warn(interpreted.friendly, { requestId: currentRequest.requestId, chainId: reqChainId });
-        if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
-        setAutoSignError(interpreted);
-        return;
-      }
+      const primitive = currentRequest.primitive ?? 'userop';
 
-      // RequestId-level dedupe: if THIS signing requestId was already
-      // broadcast from this device, reuse the cached hash. Catches
-      // StrictMode double-mount and effect re-fire on the same request.
-      //
-      // We deliberately do NOT dedupe across different requestIds, even
-      // when the calldata is identical: that collided with legitimate
-      // user-initiated repeats (e.g. /send 0.01 USDC twice in a row would
-      // silently reuse the first hash and report fake success). The BE
-      // adds a server-side freshness/uniqueness guard for the rarer case
-      // of a BE-side retry under a fresh requestId.
-      const dedupeHit = findRecentBroadcast(currentRequest.requestId);
-      let hash: `0x${string}`;
+      // RequestId-level dedupe applies only to hash-producing primitives
+      // (userop / eoa_tx). EIP-712 sign-only paths never broadcast so there's
+      // nothing to dedupe against — the BE-side request-cache + (signature,
+      // expiresAt) gate is the equivalent guarantee.
+      let result: DispatchResult;
+      const dedupeHit = primitive !== 'eip712'
+        ? findRecentBroadcast(currentRequest.requestId)
+        : null;
       if (dedupeHit) {
         log.warn(
           'duplicate-requestId — reusing prior broadcast instead of re-sending',
           { requestId: currentRequest.requestId, hash: dedupeHit.hash, ageMs: Date.now() - dedupeHit.ts },
           { toast: false },
         );
-        hash = dedupeHit.hash as `0x${string}`;
+        result = { kind: primitive as 'userop' | 'eoa_tx', hash: dedupeHit.hash as `0x${string}` };
       } else {
-      try {
-        // trackInFlightBroadcast coalesces concurrent sends of the same
-        // requestId within this tab. Prevents a second userOp from being
-        // submitted when StrictMode/effect-rerun fires while the first
-        // send is still in flight.
-        hash = await trackInFlightBroadcast(
-          currentRequest.requestId,
-          () => sessionClient!.sendTransaction({
-            to: currentRequest.to as `0x${string}`,
-            value: BigInt(currentRequest.value),
-            data: currentRequest.data as `0x${string}`,
-            account: sessionClient!.account!,
-            chain: null,
-          }),
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-        const interpreted = interpretSignError(err);
-        const viemCtx = extractViemErrorContext(err, reqChainId);
-        const lastRpc = getLastRpc(reqChainId);
-        const lastRpcSummary = summarizeLastRpc(lastRpc);
-        log.error(
-          'sendTransaction failed',
-          {
+        try {
+          result = await dispatchSign(currentRequest, {
+            getSessionClient,
+            loadEoa,
+            cloudStoragePassword: privyDid,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+          const interpreted = interpretSignError(err);
+          const viemCtx = extractViemErrorContext(err, reqChainId);
+          const lastRpc = getLastRpc(reqChainId);
+          const lastRpcSummary = summarizeLastRpc(lastRpc);
+          log.error(
+            'dispatchSign failed',
+            {
+              requestId: currentRequest.requestId,
+              chainId: reqChainId,
+              primitive,
+              purpose: currentRequest.purpose,
+              durationMs: Date.now() - startMs,
+              // The exact JSON-RPC method that was last in flight when the error
+              // fired (only meaningful for userop). Instrumented via rpcTrace.
+              lastRpcKind: lastRpc?.kind,
+              lastRpcMethod: lastRpc?.method,
+              lastRpcHost: lastRpc?.host,
+              lastRpcStatus: lastRpc?.status,
+              lastRpcDurationMs:
+                lastRpc ? (lastRpc.finishedAt ?? Date.now()) - lastRpc.startedAt : undefined,
+              lastRpcInFlight: lastRpc ? lastRpc.finishedAt === undefined : undefined,
+              lastRpcErrorBody: lastRpc?.errorBody,
+              lastRpcBodyBytes: lastRpc?.bodyBytes,
+              lastRpcThrowName: lastRpc?.throwName,
+              lastRpcThrowMessage: lastRpc?.throwMessage,
+              lastRpcThrowCause: lastRpc?.throwCause,
+              kind: viemCtx.kind,
+              endpoint: viemCtx.endpoint,
+              status: viemCtx.status,
+              body: viemCtx.body,
+              shortMessage: viemCtx.shortMessage,
+              details: viemCtx.details,
+              causeChain: viemCtx.causeChain,
+              ...envSnapshot(),
+              err: msg,
+            },
+            { toast: false },
+          );
+          log.warn(interpreted.friendly, { requestId: currentRequest.requestId });
+          if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
+          postResponse(backendUrl, {
             requestId: currentRequest.requestId,
-            chainId: reqChainId,
-            durationMs: Date.now() - startMs,
-            sca: sessionClient?.account?.address,
-            // The exact JSON-RPC method that was last in flight when the error
-            // fired — narrows "userOp send failed" down to one of:
-            //   bundler:eth_sendUserOperation / eth_estimateUserOperationGas
-            //   paymaster:pm_getPaymasterStubData / pm_getPaymasterData
-            //   rpc:eth_call (during userOp prep)
-            // Instrumented in `utils/rpcTrace.ts`.
-            lastRpcKind: lastRpc?.kind,
-            lastRpcMethod: lastRpc?.method,
-            lastRpcHost: lastRpc?.host,
-            lastRpcStatus: lastRpc?.status,
-            lastRpcDurationMs:
-              lastRpc ? (lastRpc.finishedAt ?? Date.now()) - lastRpc.startedAt : undefined,
-            lastRpcInFlight: lastRpc ? lastRpc.finishedAt === undefined : undefined,
-            lastRpcErrorBody: lastRpc?.errorBody,
-            lastRpcBodyBytes: lastRpc?.bodyBytes,
-            lastRpcThrowName: lastRpc?.throwName,
-            lastRpcThrowMessage: lastRpc?.throwMessage,
-            lastRpcThrowCause: lastRpc?.throwCause,
-            kind: viemCtx.kind,
-            endpoint: viemCtx.endpoint,
-            status: viemCtx.status,
-            body: viemCtx.body,
-            shortMessage: viemCtx.shortMessage,
-            details: viemCtx.details,
-            causeChain: viemCtx.causeChain,
-            ...envSnapshot(),
-            err: msg,
-          },
-          { toast: false },
-        );
-        log.warn(interpreted.friendly, { requestId: currentRequest.requestId });
-        if (err instanceof Error && err.stack) log.debug('stack', { stack: err.stack });
-        // Tell the BE the request failed AND why. The BE keys off `errorCode`
-        // to drive recovery flows (e.g. /buy nudge on insufficient_token_balance);
-        // without this it would just timeout the signing request and the user
-        // would see no contextual help in chat. `errorRaw` is enriched with the
-        // viem cause-chain context (kind/status/endpoint/body) so the BE log
-        // shows transport-vs-evm root cause without re-parsing freeform text.
-        postResponse(backendUrl, {
-          requestId: currentRequest.requestId,
-          requestType: 'sign',
-          privyToken,
-          rejected: true,
-          errorCode: interpreted.code,
-          errorMessage: interpreted.friendly,
-          errorRaw: buildErrorRaw(err, viemCtx, {
-            durationMs: Date.now() - startMs,
-            sca: sessionClient?.account?.address,
-            lastRpc: lastRpcSummary,
-            ...envSnapshot(),
-          }),
-        }).catch((e) => log.debug('postResponse(error) failed', { err: String(e) }));
-        setAutoSignError(interpreted);
-        return;
-      }
+            requestType: 'sign',
+            privyToken,
+            rejected: true,
+            errorCode: interpreted.code,
+            errorMessage: interpreted.friendly,
+            errorRaw: buildErrorRaw(err, viemCtx, {
+              durationMs: Date.now() - startMs,
+              lastRpc: lastRpcSummary,
+              ...envSnapshot(),
+            }),
+          }).catch((e) => log.debug('postResponse(error) failed', { err: String(e) }));
+          setAutoSignError(interpreted);
+          return;
+        }
       }
 
-      log.info('step', { step: 'submitted', requestId: currentRequest.requestId, hash });
+      log.info('step', {
+        step: 'submitted',
+        requestId: currentRequest.requestId,
+        primitive,
+        purpose: currentRequest.purpose,
+        ...(result.kind === 'eip712'
+          ? { signer: result.signer, polymarketOrderId: result.polymarketOrderId }
+          : { hash: result.hash }),
+      });
 
-      // Best-effort: ack the txHash to the backend. The chain is already source
-      // of truth — if this fails (e.g. 404 because the request cache expired),
-      // log it but still treat the operation as successful.
+      // Post the response to the BE. For userop/eoa_tx the chain is the source
+      // of truth so this is best-effort; for eip712 the BE NEEDS this payload
+      // to advance the bet (verifies recovered signer, reads polymarketOrderId).
       try {
-        await reportTxHash(hash);
+        await postResponse(backendUrl, buildResponseBody(currentRequest, result));
       } catch (err) {
         log.warn(
-          'reportTxHash failed (tx already on-chain)',
-          { requestId: currentRequest.requestId, hash, err: String(err) },
+          'postResponse failed',
+          { requestId: currentRequest.requestId, primitive, err: String(err) },
           { toast: false },
         );
       }
@@ -372,7 +377,7 @@ export function SignHandler({
         setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
       }
     })();
-  }, [currentRequest, serializedBlob, keyStatus, reportTxHash, backendUrl, privyToken, done, needsCrossChainApproval]);
+  }, [currentRequest, serializedBlob, keyStatus, backendUrl, privyToken, done, needsCrossChainApproval, getSessionClient, loadEoa, privyDid]);
 
   if (needsCrossChainApproval && installOnChain) {
     return (
@@ -502,11 +507,48 @@ export function SignHandler({
         description: currentRequest.description,
         expiresAt: currentRequest.expiresAt,
         autoSign: currentRequest.autoSign,
+        primitive: currentRequest.primitive,
+        purpose: currentRequest.purpose,
+        primaryType: currentRequest.primaryType,
+        domainName: currentRequest.domain?.name,
+        message: currentRequest.message,
       }}
       approve={async () => {
-        if (!embedded) throw new Error('Smart wallet not ready');
         const reqChainId = currentRequest.chainId ?? getChainId();
-        log.info('step', { step: 'started', requestId: currentRequest.requestId, chainId: reqChainId, path: 'manual' });
+        const primitive = currentRequest.primitive ?? 'userop';
+        log.info('step', {
+          step: 'started',
+          requestId: currentRequest.requestId,
+          chainId: reqChainId,
+          path: 'manual',
+          primitive,
+        });
+
+        // Non-userop primitives can't use the Privy sudo wallet (eoa_tx + eip712
+        // require the session-key EOA). Route through dispatchSign so all three
+        // primitives share one path. The result body is identical to the
+        // auto-sign success path.
+        if (primitive !== 'userop') {
+          const result = await dispatchSign(currentRequest, {
+            getSessionClient,
+            loadEoa,
+            cloudStoragePassword: privyDid,
+          });
+          await postResponse(backendUrl, buildResponseBody(currentRequest, result));
+          log.info('step', {
+            step: 'succeeded',
+            requestId: currentRequest.requestId,
+            chainId: reqChainId,
+            path: 'manual',
+            primitive,
+          });
+          setTimeout(() => window.Telegram?.WebApp?.close(), CLOSE_DELAY_MS);
+          return;
+        }
+
+        // userop manual path — unchanged: Privy embedded wallet sudo-signs so
+        // the user sees the native Privy confirm popup.
+        if (!embedded) throw new Error('Smart wallet not ready');
         const sudoClient = await getSudoClient(reqChainId);
         const hash = await sudoClient.sendTransaction({
           to: currentRequest.to as `0x${string}`,

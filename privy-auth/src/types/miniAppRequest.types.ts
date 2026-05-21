@@ -2,6 +2,19 @@ export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 export type SignKind = 'yield_deposit' | 'yield_withdraw';
 
+// Wire-level signing primitive (mirrors BE `SigningRequestKind`). Absent = 'userop'
+// for back-compat with legacy queued rows.
+export type SignPrimitive = 'userop' | 'eoa_tx' | 'eip712';
+export type Eip712Purpose = 'clob_auth' | 'polymarket_order';
+
+export interface SignTypedDataDomain {
+  name?: string;
+  version?: string;
+  chainId?: number;
+  verifyingContract?: `0x${string}`;
+  salt?: `0x${string}`;
+}
+
 export type TxStep = {
   to: string;
   value: string;    // wei as decimal string
@@ -42,6 +55,18 @@ export interface SignRequest extends BaseRequest {
   tokenAddress?: string;
   steps?: TxStep[];
   displayMeta?: YieldDisplayMeta;
+  // Signing primitive discriminator. Absent = 'userop' (legacy rows + every
+  // current /send /swap /yield request). 'eoa_tx' and 'eip712' added for the
+  // queue-driven Polymarket bet flow. Field name mirrors BE wire format.
+  primitive?: SignPrimitive;
+  purpose?: Eip712Purpose;
+  domain?: SignTypedDataDomain;
+  types?: Record<string, Array<{ name: string; type: string }>>;
+  primaryType?: string;
+  // BigInts must arrive as decimal strings — JSON cannot carry them.
+  message?: Record<string, unknown>;
+  betId?: string;
+  positionId?: string;
 }
 
 export interface ApproveRequest extends BaseRequest {
@@ -87,6 +112,12 @@ export interface SignResponse extends BaseResponse {
   // never surfaced to the user. errorMessage is the friendly version BE may
   // re-display.
   errorRaw?: string;
+  // EIP-712 outcomes: BE recovers `signer` locally and discards.
+  // `polymarketOrderId` set only for purpose='polymarket_order' (FE submits
+  // direct to Polymarket CLOB and forwards the returned id).
+  signature?: string;
+  signer?: string;
+  polymarketOrderId?: string;
 }
 
 interface DelegationRecordDto {

@@ -18,6 +18,7 @@ import {
 import { toErrorMessage } from '../utils/toErrorMessage';
 import { createLogger } from '../utils/logger';
 import { getChainId } from '../utils/chainConfig';
+import { wipeAllManagedSecrets } from '../utils/clobCreds';
 
 const log = createLogger('useDelegatedKey');
 const STORAGE_KEY = 'delegated_key';
@@ -383,8 +384,14 @@ export function useDelegatedKey(options: {
       }
     }
 
-    // 3. Local — always run.
+    // 3. Local — always run. Wipe the delegated_key blob first, then walk the
+    //    cloudStorageKeys registry to drop every per-protocol secret (CLOB
+    //    creds, etc.). Order doesn't matter for safety — both are best-effort
+    //    local removals — but doing the primary blob first matches user
+    //    intent: "Remove key" succeeds visibly even if a stray secondary
+    //    wipe times out.
     await cloudStorageRemoveItem(STORAGE_KEY);
+    await wipeAllManagedSecrets();
     setSerializedBlobs({});
     setInstalledChainIds([]);
     keypairRef.current = null;

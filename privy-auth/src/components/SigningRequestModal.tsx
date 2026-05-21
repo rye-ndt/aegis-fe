@@ -9,6 +9,14 @@ export interface SignRequestEvent {
   description: string;
   expiresAt: number;
   autoSign?: boolean;
+  // Non-userop primitives are defensive-only here — the bet flow always
+  // autoSigns. The fields below let the modal render a typed-data preview
+  // instead of the raw to/value/data view (which is zeroed for eip712).
+  primitive?: 'userop' | 'eoa_tx' | 'eip712';
+  purpose?: 'clob_auth' | 'polymarket_order';
+  primaryType?: string;
+  domainName?: string;
+  message?: Record<string, unknown>;
 }
 
 function formatValue(wei: string): string {
@@ -85,19 +93,7 @@ export function SigningRequestModal({
         </div>
 
         <div className="px-5 py-4 max-h-72 overflow-y-auto">
-          {!showRaw ? (
-            <div className="space-y-2.5">
-              <Row label="Going to" value={event.to} mono />
-              <Row label="Amount" value={`${formatValue(event.value)} AVAX`} mono />
-              {event.data && event.data !== '0x' && (
-                <Row label="Details" value={truncateHex(event.data)} mono />
-              )}
-            </div>
-          ) : (
-            <pre className="text-[11px] text-white/60 font-mono whitespace-pre-wrap break-all leading-relaxed">
-              {JSON.stringify(event, null, 2)}
-            </pre>
-          )}
+          {renderPreview(event, showRaw)}
 
           {error && (
             <div className="mt-3 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">
@@ -139,6 +135,41 @@ export function SigningRequestModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function renderPreview(event: SignRequestEvent, showRaw: boolean): React.ReactNode {
+  if (event.primitive === 'eip712') {
+    if (showRaw) {
+      return (
+        <pre className="text-[11px] text-white/60 font-mono whitespace-pre-wrap break-all leading-relaxed">
+          {JSON.stringify({ primaryType: event.primaryType, domain: event.domainName, message: event.message }, null, 2)}
+        </pre>
+      );
+    }
+    return (
+      <div className="space-y-2.5">
+        <Row label="Action" value={`Sign typed data (${event.primaryType ?? '?'})`} />
+        <Row label="Domain" value={event.domainName ?? '—'} />
+        {event.purpose && <Row label="Purpose" value={event.purpose} />}
+      </div>
+    );
+  }
+  if (showRaw) {
+    return (
+      <pre className="text-[11px] text-white/60 font-mono whitespace-pre-wrap break-all leading-relaxed">
+        {JSON.stringify(event, null, 2)}
+      </pre>
+    );
+  }
+  return (
+    <div className="space-y-2.5">
+      <Row label="Going to" value={event.to} mono />
+      <Row label="Amount" value={`${formatValue(event.value)} AVAX`} mono />
+      {event.data && event.data !== '0x' && (
+        <Row label="Details" value={truncateHex(event.data)} mono />
+      )}
     </div>
   );
 }

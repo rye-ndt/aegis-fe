@@ -1,5 +1,35 @@
 # Privy Auth Mini-App — Status Log
 
+## Prediction markets — one-click cutover — 2026-05-20
+
+**What** — `SignHandler` is now the single FE entry point for every queued sign request, regardless of primitive. The legacy FE-driven bet state machines are gone:
+
+- Deleted handlers: `PlaceBetHandler.tsx`, `ClosePositionHandler.tsx`.
+- Deleted utils: `predictionMarketApi.ts` (the mutation-half — every `setupStep`/`transitionBet`/`placeOrder`/`sellOrder`/`finalizeBet`/`recordRefund`/`driftDetected`/`bridgeStatus`/`orderbook` route), `polygonEoaClient.ts` (replaced by chain-agnostic `eoaTxClient.ts`), `deepLink.ts` (no remaining verbs), `predictionMarketConstants.ts`.
+- Deleted types: `DeepLinkAction`, `BridgeStatusResponse`, `DriftDecisionResponse`, `PlaceOrderRequest`, `SellOrderRequest`, `IllegalTransitionError`, `BetInFlightError`.
+- Trimmed `polymarket.ts` to just the public read/submit surface (`submitPolymarketOrder`, `deriveClobApiKey`) + helper constants (`POLYMARKET_ORDER_TYPES`, `POLYMARKET_CLOB_AUTH_TYPES`, `applySlippage`, `sharesForStake`, `randomSalt`). All EIP-712 signing now happens generically inside `dispatchSign` against `req.domain` / `req.types` / `req.message` carried on the queued request — there is no longer a Polymarket-specific signer in the FE.
+- `App.tsx` lost both `deepLink` branches; the mini-app bootstrap is `?requestId=` for every flow (matches `/send`, `/swap`, `/yield`).
+
+`dispatchSign` (new — `components/handlers/dispatchSign.ts`) branches on the wire-level `primitive` discriminator (`'userop' | 'eoa_tx' | 'eip712'`, absent = userop for legacy rows):
+- `userop` → existing kernel session client `sendTransaction` (unchanged).
+- `eoa_tx` → `eoaTxClient.sendEoaTx(privKey, to, data, value, chainId)` — chain-agnostic viem `walletClient.sendTransaction` using the session-key EOA.
+- `eip712` → `privateKeyToAccount(sessionEoa.privateKey).signTypedData(...)` then either (a) `purpose='clob_auth'` → FE POST `/auth/api-key`, save creds to encrypted CloudStorage; (b) `purpose='polymarket_order'` → load creds, FE POST `/order` to `clob.polymarket.com` with HMAC headers, return `polymarketOrderId` on the response.
+
+**Why** — see paired plan `fe/privy-auth/constructions/2026-05-20-one-click-bet-fe.md` and `be/constructions/2026-05-20-one-click-bet-be.md`. The end state collapses `/bet` and `/close` into the same one-tap flow as `/send` / `/swap`: confirm in chat → mini-app opens with `?requestId=…` → `SignHandler` drains the queue → mini-app closes. No deep-link verbs, no per-step REST, no BE-side HMAC headers.
+
+**New conventions**
+- **`primitive` is the only signing discriminator on the wire.** Mirrors BE `SigningRequestKind`. `kind` is still the yield/prediction sub-classifier (orthogonal).
+- **CloudStorage keys are centralised in `utils/cloudStorageKeys.ts`.** Every per-protocol secret blob (CLOB creds today, future protocols later) MUST register its key here; `useDelegatedKey.removeKey` walks the registry on disconnect via `wipeAllManagedSecrets()`. Prevents secrets silently surviving "Remove key".
+- **CLOB credentials never travel to BE.** `apiKey` / `secret` / `passphrase` live only in encrypted CloudStorage and in-memory inside `submitPolymarketOrder`. Not in logs, not in toasts, not in `errorRaw` posted to `/response`.
+- **EIP-712 typed-data shape is BE-driven.** `req.domain` / `req.types` / `req.primaryType` / `req.message` are the source of truth; BE serialises BigInts as decimal strings and the FE revives them via `utils/bigintRevive.ts` keyed off the type tree. No FE-side Polymarket-specific Order-builder remains.
+- **AES-GCM+PBKDF2 encryption is factored into `utils/encryptedCloudStorage.ts`** (`encryptJson` / `decryptJson`). Delegated_key still uses the raw `encryptBlob` / `decryptBlob` underneath; CLOB creds use the new JSON wrappers. Same byte layout.
+
+**Side-effect notes**
+- `SignHandler` now requires a `privyDid` prop (used as the encrypted-CloudStorage password for CLOB creds, and to load the session EOA). Wired through `App.tsx`.
+- Manual-confirm fallback (defensive, production bet flow always autoSigns) now routes non-userop primitives through `dispatchSign` instead of the Privy sudo client — `SigningRequestModal` renders a typed-data summary for `eip712`.
+- `polymarket_creds_enc` BE column is no longer written; the encrypted blob lives client-side under `polymarket_clob_creds_<chainId>`. BLOCKER-2 (privyDid as encryption password) carries over.
+- Risk acknowledged: between FE-sign and BE `/response`, a CLOB submission can land while BE doesn't know about the order id. If `/response` fails, the BE fill-timeout sweeper marks the bet `UNFILLED` and refunds. A future BE-side "any open orders by this proxy/salt" recovery probe will close this gap.
+
 ## AA bundler proxy — FE switched to BE-proxied bundler — 2026-05-15
 
 **What** — Bundler RPCs no longer go FE → pimlico directly. `getBundlerUrl(chainId)` in `utils/chainConfig.ts` now returns `${VITE_BACKEND_URL}/aa/bundler/<chainId>`, and every kernel-client builder (`createSessionKeyClient`, `createSudoClient`, `uninstallSessionKey`) takes `privyToken` as the **last positional arg** and registers a per-host `Authorization: Bearer <token>` injector via `rpcTrace.registerHeaderInjector` before building the viem `http()` bundler transport. `CHAIN_REGISTRY` lost the `bundlerUrl` field; the per-chain `VITE_*PIMLICO_BUNDLER_URL` env vars + the `vite-env.d.ts` declaration are gone. Paymaster path is unchanged (still direct to pimlico).

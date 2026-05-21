@@ -117,27 +117,6 @@ export interface OrderbookTop {
   fetchedAt: string;
 }
 
-export interface BridgeStatusResponse {
-  /**
-   * Status string from Relay normalized to `BridgeStatus`, OR `'no-intent'`
-   * when the bet hasn't kicked off a bridge yet. The handler treats the
-   * latter as a hard error (the FE failed to record `bridgeIntentId`).
-   */
-  status: BridgeStatus | 'no-intent';
-  bridgeIntentId?: string;
-  deliveredUsdc?: string | null;
-  detail?: string | null;
-}
-
-export type DriftDecisionResponse =
-  | { decision: 'ok' }
-  | {
-      decision: 'reconfirm';
-      previousRefPriceBps: number;
-      newRefPriceBps: number;
-      driftBps: number;
-    };
-
 export interface PolymarketOrderArtifact {
   salt: string;
   maker: `0x${string}`;
@@ -154,20 +133,4 @@ export interface PolymarketOrderArtifact {
   signature: `0x${string}`;
 }
 
-export interface PlaceOrderRequest {
-  betId: string;
-  clientOrderId: string;
-  order: PolymarketOrderArtifact;
-  livePriceBps: number;
-}
 
-export interface SellOrderRequest {
-  positionId: string;
-  closingBetId: string;
-  clientOrderId: string;
-  order: PolymarketOrderArtifact;
-  livePriceBps: number;
-}
-
-export type DeepLinkAction =
-  | { kind: 'close_position'; positionId: string };
