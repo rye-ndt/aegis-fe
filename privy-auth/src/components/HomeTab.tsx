@@ -6,6 +6,7 @@ import { useNotifications, type NotificationItem } from '../hooks/useNotificatio
 import { ShieldIcon } from './atomics/icons';
 import { Spinner } from './atomics/spinner';
 import { YieldPositions } from './YieldPositions';
+import { PredictionPositions } from './PredictionPositions';
 import { buildExplorerUrl, chainName } from '../utils/chainConfig';
 import { createLogger } from '../utils/logger';
 
@@ -79,6 +80,8 @@ export function HomeTab({ delegationState }: { delegationState: DelegationState 
       />
 
       <YieldPositions />
+
+      <PredictionPositions />
 
       <RecentTransfers
         items={notifications.items}

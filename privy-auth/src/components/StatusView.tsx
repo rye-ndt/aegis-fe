@@ -6,7 +6,25 @@ import { ConfigsTab } from './ConfigsTab';
 import { PointsTab } from './PointsTab';
 import { ActivityTab } from './ActivityTab';
 
-type Tab = 'home' | 'activity' | 'points' | 'configs';
+export type Tab = 'home' | 'activity' | 'points' | 'configs';
+
+const TAB_AFTER_SIGN_KEY = 'aegis.tabAfterSign';
+const VALID_TABS: readonly Tab[] = ['home', 'activity', 'points', 'configs'];
+
+export function persistTabAfterSign(tab: Tab): void {
+  try { sessionStorage.setItem(TAB_AFTER_SIGN_KEY, tab); } catch { /* no-op */ }
+}
+
+function consumeTabAfterSign(): Tab {
+  try {
+    const raw = sessionStorage.getItem(TAB_AFTER_SIGN_KEY);
+    if (!raw) return 'home';
+    sessionStorage.removeItem(TAB_AFTER_SIGN_KEY);
+    return (VALID_TABS as readonly string[]).includes(raw) ? (raw as Tab) : 'home';
+  } catch {
+    return 'home';
+  }
+}
 
 export function StatusView({
   eoaAddress,
@@ -25,7 +43,10 @@ export function StatusView({
   delegationState: DelegationState;
   removeKey: () => Promise<void>;
 }) {
-  const [tab, setTab] = React.useState<Tab>('home');
+  // Initialize from sessionStorage so a sign-flow reload (triggered by
+  // ClosePositionSheet via ?requestId=) restores the user's pre-sign tab. The
+  // key is consumed on first mount and never re-applied.
+  const [tab, setTab] = React.useState<Tab>(() => consumeTabAfterSign());
 
   return (
     <AppDataProvider backendUrl={backendUrl} privyToken={privyToken}>

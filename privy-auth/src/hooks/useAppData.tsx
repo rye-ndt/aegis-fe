@@ -42,12 +42,32 @@ export type UserProfile = {
   pendingFlushed: number;
 };
 
+export type PmPositionStatus = 'open' | 'closing' | 'closed' | 'resolved';
+
+export type PmPosition = {
+  id: string;
+  marketId: string;
+  outcomeTokenId: string;
+  side: string;
+  marketQuestion: string;
+  outcomeLabel: string;
+  sizeShares: string;
+  entryPriceAvgBps: number;
+  entryStakeUsdcCents: number;
+  currentValueUsdcCents: number | null;
+  status: PmPositionStatus;
+  openedAtEpoch: number;
+};
+
+export type PmPositionsData = { positions: PmPosition[] };
+
 type Resource<T> = { data: T | null; loading: boolean; error: string | null; refetch: () => void };
 
 type AppData = {
   portfolio: Resource<PortfolioToken[]>;
   delegations: Resource<GrantPermission[]>;
   yieldPositions: Resource<YieldPositionsData>;
+  pmPositions: Resource<PmPositionsData>;
   userProfile: Resource<UserProfile>;
   backendUrl: string;
   privyToken: string;
@@ -77,6 +97,15 @@ function parseGrants(body: unknown): GrantPermission[] {
 function parseUserProfile(body: unknown): UserProfile {
   const data = (body ?? {}) as Record<string, unknown>;
   return { pendingFlushed: typeof data.pendingFlushed === 'number' ? data.pendingFlushed : 0 };
+}
+
+export function parsePmPositions(body: unknown): PmPositionsData {
+  // BE ships the new shape ({ positions: PositionListItem[] }) in the paired
+  // deploy. Tolerate `null`/missing fields without throwing, but do not carry a
+  // permanent dual-shape branch — the parser stays narrow on purpose.
+  const data = (body ?? {}) as Record<string, unknown>;
+  const positions = Array.isArray(data.positions) ? (data.positions as PmPosition[]) : [];
+  return { positions };
 }
 
 function parseYieldPositions(body: unknown): YieldPositionsData {
@@ -137,6 +166,19 @@ export function AppDataProvider({
     },
   );
 
+  const pmPositions = useFetch<PmPositionsData>(
+    privyToken && backendUrl ? `${backendUrl}/predictionMarket/positions` : null,
+    {
+      headers: authHeaders,
+      transform: parsePmPositions,
+      errorMessage: 'Could not load prediction positions',
+      // Mirror delegations: row state changes server-side after SignHandler
+      // finishes (open → closing → gone). Re-pull on visibility to drop stale
+      // 'closing' rows when the user reopens the mini-app.
+      refetchOnVisible: true,
+    },
+  );
+
   const userProfile = useFetch<UserProfile>(
     privyToken && backendUrl ? `${backendUrl}/user/profile` : null,
     {
@@ -147,7 +189,7 @@ export function AppDataProvider({
   );
 
   const value = React.useMemo<AppData>(
-    () => ({ portfolio, delegations, yieldPositions, userProfile, backendUrl, privyToken }),
+    () => ({ portfolio, delegations, yieldPositions, pmPositions, userProfile, backendUrl, privyToken }),
     [
       portfolio.data,
       portfolio.loading,
@@ -158,6 +200,9 @@ export function AppDataProvider({
       yieldPositions.data,
       yieldPositions.loading,
       yieldPositions.error,
+      pmPositions.data,
+      pmPositions.loading,
+      pmPositions.error,
       userProfile.data,
       userProfile.loading,
       userProfile.error,
@@ -178,6 +223,7 @@ function useAppData(): AppData {
 export const usePortfolio = () => useAppData().portfolio;
 export const useDelegations = () => useAppData().delegations;
 export const useYieldPositions = () => useAppData().yieldPositions;
+export const usePmPositions = () => useAppData().pmPositions;
 export const useUserProfile = () => useAppData().userProfile;
 export const useAppConfig = () => {
   const { backendUrl, privyToken } = useAppData();
