@@ -37,7 +37,14 @@ export async function dispatchSign(
   deps: DispatchSignDeps,
 ): Promise<DispatchResult> {
   const primitive = req.primitive ?? 'userop';
-  const chainId = req.chainId!;
+  // chainId is part of the BE contract for every sign request (set by the
+  // renderer from the capability's target chain). Fail loud with a precise
+  // message instead of letting `undefined` flow into the client builder,
+  // which surfaced as the misleading "Chain undefined is not configured".
+  if (req.chainId === undefined) {
+    throw new Error(`sign request ${req.requestId} is missing chainId (BE contract violation)`);
+  }
+  const chainId = req.chainId;
 
   if (primitive === 'userop') {
     const sc = await deps.getSessionClient(chainId);
